@@ -1,0 +1,25 @@
+// stdlib
+def z     = const(1,0);
+def pred  = Pr[const(0,0), id(1,2)];
+def add   = Pr[id(1,1), Cn[s, id(3,3)]];
+def mult  = Pr[z, Cn[add, id(3,3), id(1,3)]];
+def exp   = Pr[const(1,1), Cn[mult, id(1,3), id(3,3)]];
+def fact  = Pr[const(0, 1), Cn[mult, Cn[s, id(1,2)], id(2,2)]];
+def monus = Pr[id(1,1), Cn[pred, id(3,3)]];
+def sg    = Pr[const(0,0), Cn[s, Cn[z, id(1,2)]]];
+def sgbar = Pr[const(0,1), Cn[z, id(1,2)]];
+
+// general recursion
+def isqrt = Mn[Cn[monus, id(1,2), Cn[mult, id(2,2), id(2,2)]]];
+
+eval add(3, 2);
+eval mult(6, 7);
+eval exp(2, 10);
+eval fact(7);
+eval monus(10, 3);
+eval sg(0);
+eval sg(42);
+eval sgbar(0);
+eval isqrt(9);
+eval isqrt(100);
+eval Cn[s, s](5);

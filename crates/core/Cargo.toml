@@ -1,0 +1,18 @@
+[package]
+name = "lib-robin-core"
+version = "0.1.0"
+edition = "2024"
+description = "A minimal language for primitive recursive and general recursive functions"
+
+[dependencies]
+# error handling
+thiserror = "2.0.18"
+# codegen
+cranelift-codegen = "0.128.3"
+cranelift-frontend = "0.128.3"
+cranelift-module = "0.128.3"
+cranelift-native = "0.128.3"
+cranelift-object = "0.128.3"
+
+[dev-dependencies]
+rstest = "0.26.1"

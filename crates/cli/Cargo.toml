@@ -1,0 +1,17 @@
+[package]
+name = "robin-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI for the robin language"
+
+[[bin]]
+name = "robin"
+path = "src/main.rs"
+
+[dependencies]
+# cli parse
+argh = "0.1.14"
+# error handling
+anyhow = "1.0.101"
+# homespun
+lib-robin-core = { path = "../core" }
