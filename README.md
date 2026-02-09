@@ -1,6 +1,6 @@
 # robin
 Optimizing native compiler for the class of (partial) recursive functions, using cranelift...
-- Turing-complete by Church's thesis
+- Turing-complete (primitive recursive basis with μ-minimization)
 
 ### Usage
 ```
