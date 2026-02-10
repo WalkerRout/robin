@@ -172,7 +172,7 @@ where
     let loop_body = builder.create_block();
     let exit = builder.create_block();
 
-    // header params: (counter, acc)
+    // loops need (counter, acc)
     builder.append_block_param(header, types::I64);
     builder.append_block_param(header, types::I64);
 

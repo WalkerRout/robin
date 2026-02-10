@@ -12,6 +12,7 @@ pub enum Lowerror {
   Undefined(String),
 
   // can we use latex in doc strings? thatd be neat...
+  // - could use https://github.com/victe/rust-latex-doc-minimal-example but its a bit more work...
   #[error("id({k},{n}) - k must satisfy 1 <= k <= n")]
   InvalidProjection { k: usize, n: usize },
 
@@ -165,9 +166,7 @@ impl Pass<Program> for Lower {
   type Error = Lowerror;
 
   fn run(mut self, program: &Program) -> Result<ProgramIR, Lowerror> {
-    for decl in &program.decls {
-      decl.fold(&mut self)?;
-    }
+    let _ = program.fold(&mut self)?;
     Ok(self.finish())
   }
 }
