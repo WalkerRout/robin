@@ -501,7 +501,9 @@ impl Codegen<ObjectModule> {
     settings_builder.set("opt_level", opt_level)?;
     settings_builder.set("preserve_frame_pointers", "false")?;
 
-    if cfg!(windows) {
+    if cfg!(target_arch = "aarch64") {
+      settings_builder.set("is_pic", "true")?;
+    } else {
       settings_builder.set("is_pic", "false")?;
     }
 

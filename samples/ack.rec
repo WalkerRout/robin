@@ -1,5 +1,0 @@
-def add = Pr[id(1,1), Cn[s, id(3,3)]];
-
-// heavy(x, y) = x * (y + 1) — loops y times, each step does iadd(x, acc)
-def heavy = Pr[id(1,1), Cn[add, id(1,3), id(3,3)]];
-eval heavy(1, 10000000);
