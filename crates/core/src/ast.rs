@@ -1,54 +1,20 @@
 use std::fmt;
 
-/// Visitor trait for traversing the recursive functions AST
-///
-/// Implementors define how to handle each node kind
+/// Catamorphism/abstract-fold over parsed AST
 pub trait Visitor<T> {
   type Error;
 
-  /// Visit a complete program (sequence of declarations)
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if any declaration fails to process
   fn visit_program(&mut self, program: &Program) -> Result<T, Self::Error>;
-
-  /// Visit a single declaration (def or eval)
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the declaration is malformed
   fn visit_decl(&mut self, decl: &Decl) -> Result<T, Self::Error>;
-
-  /// Visit a function definition
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the definition body is invalid
   fn visit_def(&mut self, def: &Def) -> Result<T, Self::Error>;
-
-  /// Visit an eval command
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the evaluation fails
   fn visit_eval(&mut self, eval: &Eval) -> Result<T, Self::Error>;
-
-  /// Visit an expression (function combinator tree)
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the expression is malformed
   fn visit_expr(&mut self, expr: &Expr) -> Result<T, Self::Error>;
 }
 
 pub trait Visitable<T> {
-  /// Accept a visitor, delegating to the appropriate visitor method
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the visitor encounters a problem processing this node
-  fn accept<V: Visitor<T>>(&self, visitor: &mut V) -> Result<T, V::Error>;
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +23,10 @@ pub struct Program {
 }
 
 impl<T> Visitable<T> for Program {
-  fn accept<V: Visitor<T>>(&self, visitor: &mut V) -> Result<T, V::Error> {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
     visitor.visit_program(self)
   }
 }
@@ -78,7 +47,10 @@ pub enum Decl {
 }
 
 impl<T> Visitable<T> for Decl {
-  fn accept<V: Visitor<T>>(&self, visitor: &mut V) -> Result<T, V::Error> {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
     visitor.visit_decl(self)
   }
 }
@@ -112,7 +84,10 @@ pub struct Def {
 }
 
 impl<T> Visitable<T> for Def {
-  fn accept<V: Visitor<T>>(&self, visitor: &mut V) -> Result<T, V::Error> {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
     visitor.visit_def(self)
   }
 }
@@ -131,7 +106,10 @@ pub struct Eval {
 }
 
 impl<T> Visitable<T> for Eval {
-  fn accept<V: Visitor<T>>(&self, visitor: &mut V) -> Result<T, V::Error> {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
     visitor.visit_eval(self)
   }
 }
@@ -173,7 +151,10 @@ pub enum Expr {
 }
 
 impl<T> Visitable<T> for Expr {
-  fn accept<V: Visitor<T>>(&self, visitor: &mut V) -> Result<T, V::Error> {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
     visitor.visit_expr(self)
   }
 }

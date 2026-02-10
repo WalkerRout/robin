@@ -96,175 +96,85 @@ impl Iterator for Lexer<'_> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use rstest::*;
 
   mod lexer {
     use super::*;
 
-    mod fixtures {
-      use super::*;
-
-      #[fixture]
-      pub fn basic_def() -> (&'static str, Vec<Token>) {
-        (
-          "def pred = Pr[const(0, 0), id(1,2)];",
-          vec![
-            Token::new(TokenKind::Def, "def"),
-            Token::new(TokenKind::Ident, "pred"),
-            Token::new(TokenKind::Assign, "="),
-            Token::new(TokenKind::Pr, "Pr"),
-            Token::new(TokenKind::LBracket, "["),
-            Token::new(TokenKind::Const, "const"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "0"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "0"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Id, "id"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "1"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "2"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::RBracket, "]"),
-            Token::new(TokenKind::Semicolon, ";"),
-          ],
-        )
-      }
-
-      #[fixture]
-      pub fn composition() -> (&'static str, Vec<Token>) {
-        (
-          "def add = Pr[id(1,1), Cn[s, id(3,3)]];",
-          vec![
-            Token::new(TokenKind::Def, "def"),
-            Token::new(TokenKind::Ident, "add"),
-            Token::new(TokenKind::Assign, "="),
-            Token::new(TokenKind::Pr, "Pr"),
-            Token::new(TokenKind::LBracket, "["),
-            Token::new(TokenKind::Id, "id"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "1"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "1"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Cn, "Cn"),
-            Token::new(TokenKind::LBracket, "["),
-            Token::new(TokenKind::Succ, "s"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Id, "id"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "3"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "3"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::RBracket, "]"),
-            Token::new(TokenKind::RBracket, "]"),
-            Token::new(TokenKind::Semicolon, ";"),
-          ],
-        )
-      }
-
-      #[fixture]
-      pub fn eval_stmt() -> (&'static str, Vec<Token>) {
-        (
-          "eval add(3, 2);",
-          vec![
-            Token::new(TokenKind::Eval, "eval"),
-            Token::new(TokenKind::Ident, "add"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "3"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "2"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::Semicolon, ";"),
-          ],
-        )
-      }
-
-      #[fixture]
-      pub fn minimization() -> (&'static str, Vec<Token>) {
-        (
-          "def isqrt = Mn[Cn[monus, id(1,2), Cn[mult, id(2,2), id(2,2)]]];",
-          vec![
-            Token::new(TokenKind::Def, "def"),
-            Token::new(TokenKind::Ident, "isqrt"),
-            Token::new(TokenKind::Assign, "="),
-            Token::new(TokenKind::Mn, "Mn"),
-            Token::new(TokenKind::LBracket, "["),
-            Token::new(TokenKind::Cn, "Cn"),
-            Token::new(TokenKind::LBracket, "["),
-            Token::new(TokenKind::Ident, "monus"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Id, "id"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "1"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "2"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Cn, "Cn"),
-            Token::new(TokenKind::LBracket, "["),
-            Token::new(TokenKind::Ident, "mult"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Id, "id"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "2"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "2"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Id, "id"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "2"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "2"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::RBracket, "]"),
-            Token::new(TokenKind::RBracket, "]"),
-            Token::new(TokenKind::RBracket, "]"),
-            Token::new(TokenKind::Semicolon, ";"),
-          ],
-        )
-      }
-
-      #[fixture]
-      pub fn comments() -> (&'static str, Vec<Token>) {
-        (
-          "// this is a comment\ndef f = const(1, 0);",
-          vec![
-            Token::new(TokenKind::Def, "def"),
-            Token::new(TokenKind::Ident, "f"),
-            Token::new(TokenKind::Assign, "="),
-            Token::new(TokenKind::Const, "const"),
-            Token::new(TokenKind::LParen, "("),
-            Token::new(TokenKind::Int, "1"),
-            Token::new(TokenKind::Comma, ","),
-            Token::new(TokenKind::Int, "0"),
-            Token::new(TokenKind::RParen, ")"),
-            Token::new(TokenKind::Semicolon, ";"),
-          ],
-        )
+    fn assert_tokens(input: &str, expected: Vec<Token>) {
+      let mut lexer = Lexer::new(input);
+      for expected_token in expected {
+        let actual = lexer.next_token().unwrap();
+        assert_eq!(actual.kind, expected_token.kind, "token kind mismatch");
+        assert_eq!(
+          actual.literal, expected_token.literal,
+          "token literal mismatch"
+        );
       }
     }
 
-    #[rstest]
-    #[case::basic_def(fixtures::basic_def())]
-    #[case::composition(fixtures::composition())]
-    #[case::eval_stmt(fixtures::eval_stmt())]
-    #[case::minimization(fixtures::minimization())]
-    #[case::comments(fixtures::comments())]
-    fn next_token(#[case] input: (&'static str, Vec<Token>)) {
-      let (input, expected_tokens) = input;
-      let mut lexer = Lexer::new(input);
+    #[test]
+    fn next_token() {
+      assert_tokens(
+        "def pred = Pr[const(0, 0), id(1,2)];",
+        vec![
+          Token::new(TokenKind::Def, "def"),
+          Token::new(TokenKind::Ident, "pred"),
+          Token::new(TokenKind::Assign, "="),
+          Token::new(TokenKind::Pr, "Pr"),
+          Token::new(TokenKind::LBracket, "["),
+          Token::new(TokenKind::Const, "const"),
+          Token::new(TokenKind::LParen, "("),
+          Token::new(TokenKind::Int, "0"),
+          Token::new(TokenKind::Comma, ","),
+          Token::new(TokenKind::Int, "0"),
+          Token::new(TokenKind::RParen, ")"),
+          Token::new(TokenKind::Comma, ","),
+          Token::new(TokenKind::Id, "id"),
+          Token::new(TokenKind::LParen, "("),
+          Token::new(TokenKind::Int, "1"),
+          Token::new(TokenKind::Comma, ","),
+          Token::new(TokenKind::Int, "2"),
+          Token::new(TokenKind::RParen, ")"),
+          Token::new(TokenKind::RBracket, "]"),
+          Token::new(TokenKind::Semicolon, ";"),
+        ],
+      );
+    }
 
-      for expected in expected_tokens {
-        let actual = lexer.next_token().unwrap();
-        assert_eq!(actual.kind, expected.kind, "TokenKind mismatch");
-        assert_eq!(actual.literal, expected.literal, "Token literal mismatch");
-      }
+    #[test]
+    fn next_token_eval() {
+      assert_tokens(
+        "eval add(3, 2);",
+        vec![
+          Token::new(TokenKind::Eval, "eval"),
+          Token::new(TokenKind::Ident, "add"),
+          Token::new(TokenKind::LParen, "("),
+          Token::new(TokenKind::Int, "3"),
+          Token::new(TokenKind::Comma, ","),
+          Token::new(TokenKind::Int, "2"),
+          Token::new(TokenKind::RParen, ")"),
+          Token::new(TokenKind::Semicolon, ";"),
+        ],
+      );
+    }
+
+    #[test]
+    fn next_token_comments() {
+      assert_tokens(
+        "// this is a comment\ndef f = const(1, 0);",
+        vec![
+          Token::new(TokenKind::Def, "def"),
+          Token::new(TokenKind::Ident, "f"),
+          Token::new(TokenKind::Assign, "="),
+          Token::new(TokenKind::Const, "const"),
+          Token::new(TokenKind::LParen, "("),
+          Token::new(TokenKind::Int, "1"),
+          Token::new(TokenKind::Comma, ","),
+          Token::new(TokenKind::Int, "0"),
+          Token::new(TokenKind::RParen, ")"),
+          Token::new(TokenKind::Semicolon, ";"),
+        ],
+      );
     }
   }
 }

@@ -5,15 +5,18 @@ use std::process::Command;
 
 use argh::FromArgs;
 
-use lib_robin_core::ast::Visitable;
-use lib_robin_core::codegen::Codegen;
+use lib_robin_core::backend::cranelift::AotBackend;
 use lib_robin_core::lexer::Lexer;
+use lib_robin_core::lower::Lower;
 use lib_robin_core::parser::Parser;
+use lib_robin_core::pass::Acceptor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EmitType {
   Obj,
   Exe,
+  #[cfg(feature = "jit")]
+  Jit,
 }
 
 impl fmt::Display for EmitType {
@@ -21,6 +24,8 @@ impl fmt::Display for EmitType {
     match self {
       EmitType::Obj => write!(f, "obj"),
       EmitType::Exe => write!(f, "exe"),
+      #[cfg(feature = "jit")]
+      EmitType::Jit => write!(f, "jit"),
     }
   }
 }
@@ -30,9 +35,19 @@ impl argh::FromArgValue for EmitType {
     match value {
       "obj" => Ok(EmitType::Obj),
       "exe" => Ok(EmitType::Exe),
-      other => Err(format!(
-        "unknown emit type '{other}', expected 'obj' or 'exe'"
-      )),
+      #[cfg(feature = "jit")]
+      "jit" => Ok(EmitType::Jit),
+      other => {
+        #[allow(unused_mut)]
+        #[allow(clippy::useless_vec)]
+        let mut valid = vec!["obj", "exe"];
+        #[cfg(feature = "jit")]
+        valid.push("jit");
+        Err(format!(
+          "unknown emit type '{other}', expected one of '{}'",
+          valid.join(", ")
+        ))
+      }
     }
   }
 }
@@ -48,7 +63,7 @@ struct Args {
   #[argh(option, short = 'o')]
   output: Option<String>,
 
-  /// emit type: obj or exe (default: exe)
+  /// emit type: obj, exe, or jit (default: exe)
   #[argh(option, default = "EmitType::Exe")]
   emit: EmitType,
 
@@ -78,9 +93,25 @@ fn main() -> Result<(), anyhow::Error> {
     anyhow::anyhow!("parse errors:\n  {}", msgs.join("\n  "))
   })?;
 
-  // codegen
-  let mut codegen = Codegen::new(opt_str).map_err(|e| anyhow::anyhow!("codegen init - {e}"))?;
-  program.accept(&mut codegen)?;
+  // lower ast into mid ir
+  let ir = program.accept(Lower::new())?;
+
+  // jit compile and run in process, print results from rust
+  #[cfg(feature = "jit")]
+  if args.emit == EmitType::Jit {
+    use lib_robin_core::backend::cranelift::JitBackend;
+
+    let mut backend = ir.accept(JitBackend::new_jit(opt_str)?)?;
+    let results = backend.run_evals()?;
+    for result in results {
+      println!("{result}");
+    }
+    // return early to avoid other codepath
+    return Ok(());
+  }
+
+  // aot compile ir to native object code
+  let backend = ir.accept(AotBackend::new_aot(opt_str)?)?;
 
   // determine output paths
   let input_path = Path::new(&args.input);
@@ -93,11 +124,12 @@ fn main() -> Result<(), anyhow::Error> {
     (EmitType::Obj, Some(out)) => out.clone(),
     (EmitType::Obj, None) => format!("{stem}.o"),
     (EmitType::Exe, _) => format!("{stem}.tmp.o"),
+    #[cfg(feature = "jit")]
+    (EmitType::Jit, _) => unreachable!(),
   };
 
-  codegen
-    .write_object_file(Path::new(&obj_path))
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+  // spit out the .o file
+  backend.write_object_file(Path::new(&obj_path))?;
 
   if args.emit == EmitType::Obj {
     eprintln!("compiled: {obj_path}");
@@ -116,7 +148,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
   };
 
-  // this kinda sucks but it avoids adding a dependency on a rust linker crate and 
+  // this kinda sucks but it avoids adding a dependency on a rust linker crate and
   // works cross platform so long as clang is installed...
   // - todo: implement our own linker for this garbage
 

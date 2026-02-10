@@ -13,6 +13,7 @@ cranelift-frontend = "0.128.3"
 cranelift-module = "0.128.3"
 cranelift-native = "0.128.3"
 cranelift-object = "0.128.3"
+cranelift-jit = { version = "0.128.3", optional = true }
 
-[dev-dependencies]
-rstest = "0.26.1"
+[features]
+jit = ["cranelift-jit"]

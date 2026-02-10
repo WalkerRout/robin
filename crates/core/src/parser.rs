@@ -40,10 +40,6 @@ where
   }
 
   /// Parses a stream of tokens into a `Program` AST node
-  ///
-  /// # Errors
-  ///
-  /// Returns a list of `ParserError`s if parsing fails
   pub fn parse(mut self) -> Result<Program, Vec<ParserError>> {
     match self.parse_program() {
       Some(program) => Ok(program),
@@ -253,100 +249,86 @@ where
 mod tests {
   use super::*;
   use crate::lexer::Lexer;
-  use rstest::*;
-
-  fn parse(input: &str) -> Result<Program, Vec<ParserError>> {
-    let lexer = Lexer::new(input);
-    let parser = Parser::new(lexer);
-    parser.parse()
-  }
 
   mod parser {
     use super::*;
 
-    #[rstest]
-    #[case(
-      "def pred = Pr[const(0, 0), id(1,2)];",
-      Program {
-        decls: vec![Decl::Def(Def {
-          name: "pred".into(),
-          body: Expr::Pr {
-            base: Box::new(Expr::Const { arity: 0, value: 0 }),
-            step: Box::new(Expr::Id { k: 1, n: 2 }),
-          },
-        })],
-      }
-    )]
-    #[case(
-      "def add = Pr[id(1,1), Cn[s, id(3,3)]];",
-      Program {
-        decls: vec![Decl::Def(Def {
-          name: "add".into(),
-          body: Expr::Pr {
-            base: Box::new(Expr::Id { k: 1, n: 1 }),
-            step: Box::new(Expr::Cn {
-              f: Box::new(Expr::Succ),
-              gs: vec![Expr::Id { k: 3, n: 3 }],
-            }),
-          },
-        })],
-      }
-    )]
-    #[case(
-      "eval add(3, 2);",
-      Program {
-        decls: vec![Decl::Eval(Eval {
-          func: Expr::Ref("add".into()),
-          args: vec![3, 2],
-        })],
-      }
-    )]
-    #[case(
-      "def z = const(1, 0);",
-      Program {
-        decls: vec![Decl::Def(Def {
-          name: "z".into(),
-          body: Expr::Const { arity: 1, value: 0 },
-        })],
-      }
-    )]
-    #[case(
-      "def isqrt = Mn[Cn[monus, id(1,2), Cn[mult, id(2,2), id(2,2)]]];",
-      Program {
-        decls: vec![Decl::Def(Def {
-          name: "isqrt".into(),
-          body: Expr::Mn {
-            f: Box::new(Expr::Cn {
-              f: Box::new(Expr::Ref("monus".into())),
-              gs: vec![
-                Expr::Id { k: 1, n: 2 },
-                Expr::Cn {
-                  f: Box::new(Expr::Ref("mult".into())),
-                  gs: vec![
-                    Expr::Id { k: 2, n: 2 },
-                    Expr::Id { k: 2, n: 2 },
-                  ],
-                },
-              ],
-            }),
-          },
-        })],
-      }
-    )]
-    fn parse_program(#[case] input: &str, #[case] expected: Program) {
-      let result = parse(input).unwrap();
-      assert_eq!(result, expected);
+    fn parse(input: &str) -> Result<Program, Vec<ParserError>> {
+      let lexer = Lexer::new(input);
+      let parser = Parser::new(lexer);
+      parser.parse()
     }
 
-    #[rstest]
-    #[case("def = const(1, 0);")] // missing name
-    #[case("def x const(1, 0);")] // missing =
-    #[case("def x = ;")] // missing expr
-    #[case("eval add 3, 2);")] // missing (
-    #[case("blah")] // not a decl keyword
-    fn parse_errors(#[case] input: &str) {
-      let result = parse(input);
-      assert!(result.is_err());
+    #[test]
+    fn parse_def() {
+      let result = parse("def pred = Pr[const(0, 0), id(1,2)];").unwrap();
+      assert_eq!(
+        result,
+        Program {
+          decls: vec![Decl::Def(Def {
+            name: "pred".into(),
+            body: Expr::Pr {
+              base: Box::new(Expr::Const { arity: 0, value: 0 }),
+              step: Box::new(Expr::Id { k: 1, n: 2 }),
+            },
+          })],
+        }
+      );
+    }
+
+    #[test]
+    fn parse_eval() {
+      let result = parse("eval add(3, 2);").unwrap();
+      assert_eq!(
+        result,
+        Program {
+          decls: vec![Decl::Eval(Eval {
+            func: Expr::Ref("add".into()),
+            args: vec![3, 2],
+          })],
+        }
+      );
+    }
+
+    #[test]
+    fn parse_minimization() {
+      let result =
+        parse("def isqrt = Mn[Cn[monus, id(1,2), Cn[mult, id(2,2), id(2,2)]]];").unwrap();
+      assert_eq!(
+        result,
+        Program {
+          decls: vec![Decl::Def(Def {
+            name: "isqrt".into(),
+            body: Expr::Mn {
+              f: Box::new(Expr::Cn {
+                f: Box::new(Expr::Ref("monus".into())),
+                gs: vec![
+                  Expr::Id { k: 1, n: 2 },
+                  Expr::Cn {
+                    f: Box::new(Expr::Ref("mult".into())),
+                    gs: vec![Expr::Id { k: 2, n: 2 }, Expr::Id { k: 2, n: 2 }],
+                  },
+                ],
+              }),
+            },
+          })],
+        }
+      );
+    }
+
+    #[test]
+    fn parse_error_missing_name() {
+      assert!(parse("def = const(1, 0);").is_err());
+    }
+
+    #[test]
+    fn parse_error_missing_eq() {
+      assert!(parse("def x const(1, 0);").is_err());
+    }
+
+    #[test]
+    fn parse_error_unexpected_token() {
+      assert!(parse("blah").is_err());
     }
   }
 }

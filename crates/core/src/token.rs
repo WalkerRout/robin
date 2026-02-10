@@ -8,32 +8,44 @@ pub enum Kind {
   Unknown = 0,
   Eof,
 
-  // Identifiers + literals
+  // idents and literals
   Ident,
   Int,
 
-  // Symbols
-  Assign,    // =
-  Comma,     // ,
-  Semicolon, // ;
-  LParen,    // (
-  RParen,    // )
-  LBracket,  // [
-  RBracket,  // ]
+  // symbols
+  // =
+  Assign,
+  // ,
+  Comma,
+  // ;
+  Semicolon,
+  // (
+  LParen,
+  // )
+  RParen,
+  // [
+  LBracket,
+  // ]
+  RBracket,
 
-  // Combinator keywords
+  // combinators
   Cn, // composition
   Pr, // primitive recursion
   Mn, // minimization
 
-  // Basic function keywords
-  Const, // const (constant function)
-  Succ,  // s     (successor function)
-  Id,    // id    (projection function)
+  // primitive functions
+  // const (constant function, note z = const(1, 0))
+  Const,
+  // s (successor function)
+  Succ,
+  // id (projection function)
+  Id,
 
-  // Declaration keywords
-  Def,  // def
-  Eval, // eval
+  // keywords
+  // def
+  Def,
+  // eval
+  Eval,
 }
 
 impl fmt::Display for Kind {

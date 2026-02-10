@@ -15,3 +15,6 @@ argh = "0.1.14"
 anyhow = "1.0.101"
 # homespun
 lib-robin-core = { path = "../core" }
+
+[features]
+jit = ["lib-robin-core/jit"]
