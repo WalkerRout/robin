@@ -16,42 +16,6 @@ pub trait Visitable<T> {
     V: Visitor<T>;
 }
 
-impl<T> Visitable<T> for ProgramIR {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_program(self)
-  }
-}
-
-impl<T> Visitable<T> for FuncIR {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_func(self)
-  }
-}
-
-impl<T> Visitable<T> for EvalIR {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_eval(self)
-  }
-}
-
-impl<T> Visitable<T> for Node {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_node(self)
-  }
-}
-
 /// comparison operators for the IR
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmp {
@@ -60,6 +24,18 @@ pub enum Cmp {
   Ult,
   Ugt,
   Uge,
+}
+
+impl fmt::Display for Cmp {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Cmp::Eq => write!(f, "eq"),
+      Cmp::Ne => write!(f, "ne"),
+      Cmp::Ult => write!(f, "ult"),
+      Cmp::Ugt => write!(f, "ugt"),
+      Cmp::Uge => write!(f, "uge"),
+    }
+  }
 }
 
 /// node in the middle-end intermediate representation
@@ -129,6 +105,46 @@ pub enum Node {
   Probe(usize),
 }
 
+impl<T> Visitable<T> for Node {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
+    visitor.visit_node(self)
+  }
+}
+
+impl fmt::Display for Node {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Node::Iconst(v) => write!(f, "{v}"),
+      Node::Arg(i) => write!(f, "arg({i})"),
+      Node::Iadd(a, b) => write!(f, "iadd({a}, {b})"),
+      Node::Isub(a, b) => write!(f, "isub({a}, {b})"),
+      Node::Imul(a, b) => write!(f, "imul({a}, {b})"),
+      Node::Icmp(cmp, a, b) => write!(f, "icmp.{cmp}({a}, {b})"),
+      Node::Select {
+        cond,
+        then_val,
+        else_val,
+      } => write!(f, "select({cond}, {then_val}, {else_val})"),
+      Node::Call { name, args } => {
+        let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        write!(f, "call {name}({})", args_str.join(", "))
+      }
+      Node::Loop { bound, init, body } => {
+        write!(f, "loop(bound={bound}, init={init}, {body})")
+      }
+      Node::Counter(d) => write!(f, "counter({d})"),
+      Node::Acc(d) => write!(f, "acc({d})"),
+      Node::Search { body, limit } => {
+        write!(f, "search(limit={limit}, {body})")
+      }
+      Node::Probe(d) => write!(f, "probe({d})"),
+    }
+  }
+}
+
 /// A compiled `def` statement
 #[derive(Debug)]
 pub struct FuncIR {
@@ -137,10 +153,28 @@ pub struct FuncIR {
   pub body: Node,
 }
 
+impl<T> Visitable<T> for FuncIR {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
+    visitor.visit_func(self)
+  }
+}
+
 /// A fully applied `eval` statement
 #[derive(Debug)]
 pub struct EvalIR {
   pub body: Node,
+}
+
+impl<T> Visitable<T> for EvalIR {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
+    visitor.visit_eval(self)
+  }
 }
 
 /// Lowered program consists of all function definitions and eval statements
@@ -150,8 +184,17 @@ pub struct ProgramIR {
   pub evals: Vec<EvalIR>,
 }
 
-/// increment all Counter/Acc depths by some amount, useful for pushing nodes down through nested Loops
-/// - doesnt touch Probe or Arg since they live in separate scopes
+impl<T> Visitable<T> for ProgramIR {
+  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
+  where
+    V: Visitor<T>,
+  {
+    visitor.visit_program(self)
+  }
+}
+
+// increment all Counter/Acc depths by some amount, useful for pushing nodes down through nested Loops
+// - doesnt touch Probe or Arg since they live in separate scopes
 pub fn shift_loop_depth(node: &Node, delta: usize) -> Node {
   match node {
     Node::Counter(d) => Node::Counter(d + delta),
@@ -205,8 +248,8 @@ pub fn shift_loop_depth(node: &Node, delta: usize) -> Node {
   }
 }
 
-/// increment all Probe depths by some amount, useful for pushing nodes down through nested Search
-/// - againt, doesnt touch Counter/Acc or Arg, they live in separate scopes
+// increment all Probe depths by some amount, useful for pushing nodes down through nested Search
+// - againt, doesnt touch Counter/Acc or Arg, they live in separate scopes
 pub fn shift_search_depth(node: &Node, delta: usize) -> Node {
   match node {
     Node::Probe(d) => Node::Probe(d + delta),
@@ -257,49 +300,6 @@ pub fn shift_search_depth(node: &Node, delta: usize) -> Node {
       body: Box::new(shift_search_depth(body, delta)),
       limit: *limit,
     },
-  }
-}
-
-impl fmt::Display for Cmp {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Cmp::Eq => write!(f, "eq"),
-      Cmp::Ne => write!(f, "ne"),
-      Cmp::Ult => write!(f, "ult"),
-      Cmp::Ugt => write!(f, "ugt"),
-      Cmp::Uge => write!(f, "uge"),
-    }
-  }
-}
-
-impl fmt::Display for Node {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Node::Iconst(v) => write!(f, "{v}"),
-      Node::Arg(i) => write!(f, "arg({i})"),
-      Node::Iadd(a, b) => write!(f, "iadd({a}, {b})"),
-      Node::Isub(a, b) => write!(f, "isub({a}, {b})"),
-      Node::Imul(a, b) => write!(f, "imul({a}, {b})"),
-      Node::Icmp(cmp, a, b) => write!(f, "icmp.{cmp}({a}, {b})"),
-      Node::Select {
-        cond,
-        then_val,
-        else_val,
-      } => write!(f, "select({cond}, {then_val}, {else_val})"),
-      Node::Call { name, args } => {
-        let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        write!(f, "call {name}({})", args_str.join(", "))
-      }
-      Node::Loop { bound, init, body } => {
-        write!(f, "loop(bound={bound}, init={init}, {body})")
-      }
-      Node::Counter(d) => write!(f, "counter({d})"),
-      Node::Acc(d) => write!(f, "acc({d})"),
-      Node::Search { body, limit } => {
-        write!(f, "search(limit={limit}, {body})")
-      }
-      Node::Probe(d) => write!(f, "probe({d})"),
-    }
   }
 }
 
