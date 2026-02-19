@@ -2,6 +2,8 @@
 Optimizing native compiler for the class of (partial) recursive functions, using cranelift...
 - Turing-complete (primitive recursive basis with μ-minimization)
 
+TODO: add LLVM backend with inkwell
+
 ### Usage
 ```
 Usage: robin.exe [-o <output>] [--emit <emit>] [--opt-level <opt-level>] [--] <input>
