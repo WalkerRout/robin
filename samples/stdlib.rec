@@ -12,6 +12,7 @@ def sgbar = Pr[const(0,1), Cn[z, id(1,2)]];
 // general recursion
 def isqrt = Mn[Cn[monus, id(1,2), Cn[mult, id(2,2), id(2,2)]]];
 
+// call and print function definitions
 eval add(3, 2);
 eval mult(6, 7);
 eval exp(2, 10);
