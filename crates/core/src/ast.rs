@@ -1,34 +1,57 @@
 use std::fmt;
 
-/// Catamorphism/abstract-fold over parsed AST
-pub trait Visitor<T> {
+/// paramorphic algebra over the ast
+///
+/// ```text
+/// para :: (Base Program (Program, a) -> a) -> Program -> a
+/// ```
+///
+/// each method is one case of the base functor
+pub trait Visitor {
   type Error;
 
-  fn visit_program(&mut self, program: &Program) -> Result<T, Self::Error>;
-  fn visit_decl(&mut self, decl: &Decl) -> Result<T, Self::Error>;
-  fn visit_def(&mut self, def: &Def) -> Result<T, Self::Error>;
-  fn visit_eval(&mut self, eval: &Eval) -> Result<T, Self::Error>;
-  fn visit_expr(&mut self, expr: &Expr) -> Result<T, Self::Error>;
-}
+  fn visit_program(&mut self, program: &Program) -> Result<(), Self::Error> {
+    for decl in &program.decls {
+      match decl {
+        Decl::Def(def) => self.visit_def(def)?,
+        Decl::Eval(eval) => self.visit_eval(eval)?,
+      }
+    }
+    Ok(())
+  }
 
-pub trait Visitable<T> {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>;
+  fn visit_def(&mut self, def: &Def) -> Result<(), Self::Error> {
+    self.visit_expr(&def.body)
+  }
+
+  fn visit_eval(&mut self, eval: &Eval) -> Result<(), Self::Error> {
+    self.visit_expr(&eval.func)
+  }
+
+  fn visit_expr(&mut self, expr: &Expr) -> Result<(), Self::Error> {
+    match expr {
+      Expr::Cn { f, gs } => {
+        self.visit_expr(f)?;
+        for g in gs {
+          self.visit_expr(g)?;
+        }
+      }
+      Expr::Pr { base, step } => {
+        self.visit_expr(base)?;
+        self.visit_expr(step)?;
+      }
+      Expr::Mn { f } => {
+        self.visit_expr(f)?;
+      }
+      Expr::Const { .. } | Expr::Succ | Expr::Id { .. } | Expr::Ref(_) => {}
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
   pub decls: Vec<Decl>,
-}
-
-impl<T> Visitable<T> for Program {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_program(self)
-  }
 }
 
 impl fmt::Display for Program {
@@ -44,15 +67,6 @@ impl fmt::Display for Program {
 pub enum Decl {
   Def(Def),
   Eval(Eval),
-}
-
-impl<T> Visitable<T> for Decl {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_decl(self)
-  }
 }
 
 impl From<Def> for Decl {
@@ -83,15 +97,6 @@ pub struct Def {
   pub body: Expr,
 }
 
-impl<T> Visitable<T> for Def {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_def(self)
-  }
-}
-
 impl fmt::Display for Def {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "def {} = {};", self.name, self.body)
@@ -103,15 +108,6 @@ impl fmt::Display for Def {
 pub struct Eval {
   pub func: Expr,
   pub args: Vec<u64>,
-}
-
-impl<T> Visitable<T> for Eval {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_eval(self)
-  }
 }
 
 impl fmt::Display for Eval {
@@ -129,9 +125,9 @@ impl fmt::Display for Eval {
 
 // combinator trees
 
-/// An expression in the recursive functions language
+/// an expression in the recursive functions language
 ///
-/// Each variant corresponds to a construct from recursion theory
+/// each variant corresponds to a construct from recursion theory
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
   /// constant function - const(k, n)(x_1, ..., x_k) = n
@@ -148,15 +144,6 @@ pub enum Expr {
   Pr { base: Box<Expr>, step: Box<Expr> },
   /// unbounded minimization (μ-operator) - Mn[f]
   Mn { f: Box<Expr> },
-}
-
-impl<T> Visitable<T> for Expr {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_expr(self)
-  }
 }
 
 impl fmt::Display for Expr {

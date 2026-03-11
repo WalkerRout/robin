@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 
-use crate::ast::{Decl, Def, Eval, Expr, Program, Visitable, Visitor};
+use crate::ast::{Def, Eval, Expr, Program, Visitor};
 use crate::ir::{Cmp, EvalIR, FuncIR, Node, ProgramIR, shift_loop_depth, shift_search_depth};
-use crate::pass::Pass;
 
 const MU_STEP_LIMIT: i64 = 100_000;
 
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
-pub enum Lowerror {
+pub enum LowerError {
   #[error("undefined function - {0}")]
   Undefined(String),
 
@@ -33,10 +32,10 @@ pub enum Lowerror {
   MnArityTooSmall(usize),
 }
 
-/// AST -> IR lowering visitor
+/// ast -> ir lowering
 ///
-/// implements Visitor<Node>, visit_expr is the actual catamorphism (Expr -> Node),
-/// visit_def/visit_eval handle structural wrapping and accumulate into ProgramIR...
+/// paramorphism: `Program` -> `ProgramIR`, folding `Expr` trees into `Node` trees
+/// while threading symbolic args top-down through the recursion
 pub struct Lower {
   env: HashMap<String, usize>,
   def_bodies: HashMap<String, Expr>,
@@ -54,17 +53,50 @@ impl Lower {
     }
   }
 
-  /// Extract the accumulated IR
-  pub fn finish(self) -> ProgramIR {
-    ProgramIR {
+  /// consume the lowering pass and produce a `ProgramIR`
+  pub fn lower(mut self, program: &Program) -> Result<ProgramIR, LowerError> {
+    self.visit_program(program)?;
+    Ok(ProgramIR {
       funcs: self.funcs,
       evals: self.evals,
-    }
+    })
   }
 
-  // paramorphism, folding Expr into Node while threading symbolic args top down
-  // through the recursion
-  fn lower_expr(&self, expr: &Expr, args: &[Node]) -> Result<Node, Lowerror> {
+  fn lower_def(&mut self, def: &Def) -> Result<(), LowerError> {
+    let arity = infer_arity(&self.env, &def.body)?;
+    let arg_nodes: Vec<Node> = (0..arity).map(Node::Arg).collect();
+    let body = self.lower_expr(&def.body, &arg_nodes)?;
+
+    self.funcs.push(FuncIR {
+      name: def.name.clone(),
+      arity,
+      body,
+    });
+    self.env.insert(def.name.clone(), arity);
+    self.def_bodies.insert(def.name.clone(), def.body.clone());
+
+    Ok(())
+  }
+
+  fn lower_eval(&mut self, eval: &Eval) -> Result<(), LowerError> {
+    let arity = infer_arity(&self.env, &eval.func)?;
+    if arity != eval.args.len() {
+      return Err(LowerError::ArityMismatch {
+        name: format!("{}", eval.func),
+        expected: arity,
+        got: eval.args.len(),
+      });
+    }
+
+    let arg_nodes: Vec<Node> = eval.args.iter().map(|a| Node::Iconst(*a as i64)).collect();
+    let body = self.lower_expr(&eval.func, &arg_nodes)?;
+
+    self.evals.push(EvalIR { body });
+
+    Ok(())
+  }
+
+  fn lower_expr(&self, expr: &Expr, args: &[Node]) -> Result<Node, LowerError> {
     // peepholes match structure before folding
     if let Expr::Pr { base, step } = expr {
       if let Some(node) = try_peephole_pred(base, step, args) {
@@ -123,7 +155,7 @@ impl Lower {
     }
   }
 
-  fn lower_pr(&self, base: &Expr, step: &Expr, args: &[Node]) -> Result<Node, Lowerror> {
+  fn lower_pr(&self, base: &Expr, step: &Expr, args: &[Node]) -> Result<Node, LowerError> {
     let base_arity = infer_arity(&self.env, base)?;
     let (xs, y) = if base_arity == 0 {
       (&args[..0], &args[0])
@@ -148,7 +180,7 @@ impl Lower {
     })
   }
 
-  fn lower_mn(&self, f: &Expr, args: &[Node]) -> Result<Node, Lowerror> {
+  fn lower_mn(&self, f: &Expr, args: &[Node]) -> Result<Node, LowerError> {
     let mut search_args: Vec<Node> = args.iter().map(|a| shift_search_depth(a, 1)).collect();
     search_args.push(Node::Probe(0));
 
@@ -161,71 +193,16 @@ impl Lower {
   }
 }
 
-impl Pass<Program> for Lower {
-  type Output = ProgramIR;
-  type Error = Lowerror;
+/// para :: `Program` -> `ProgramIR`
+impl Visitor for Lower {
+  type Error = LowerError;
 
-  fn run(mut self, program: &Program) -> Result<ProgramIR, Lowerror> {
-    let _ = program.fold(&mut self)?;
-    Ok(self.finish())
-  }
-}
-
-impl Visitor<Node> for Lower {
-  type Error = Lowerror;
-
-  fn visit_program(&mut self, program: &Program) -> Result<Node, Lowerror> {
-    for decl in &program.decls {
-      decl.fold(self)?;
-    }
-    // program result is structural... real output via Pass::run
-    Ok(Node::Iconst(0))
+  fn visit_def(&mut self, def: &Def) -> Result<(), LowerError> {
+    self.lower_def(def)
   }
 
-  fn visit_decl(&mut self, decl: &Decl) -> Result<Node, Lowerror> {
-    match decl {
-      Decl::Def(def) => def.fold(self),
-      Decl::Eval(eval) => eval.fold(self),
-    }
-  }
-
-  fn visit_def(&mut self, def: &Def) -> Result<Node, Lowerror> {
-    let arity = infer_arity(&self.env, &def.body)?;
-    let arg_nodes: Vec<Node> = (0..arity).map(Node::Arg).collect();
-    let body = self.lower_expr(&def.body, &arg_nodes)?;
-
-    self.funcs.push(FuncIR {
-      name: def.name.clone(),
-      arity,
-      body: body.clone(),
-    });
-    self.env.insert(def.name.clone(), arity);
-    self.def_bodies.insert(def.name.clone(), def.body.clone());
-
-    Ok(body)
-  }
-
-  fn visit_eval(&mut self, eval: &Eval) -> Result<Node, Lowerror> {
-    let arity = infer_arity(&self.env, &eval.func)?;
-    if arity != eval.args.len() {
-      return Err(Lowerror::ArityMismatch {
-        name: format!("{}", eval.func),
-        expected: arity,
-        got: eval.args.len(),
-      });
-    }
-
-    let arg_nodes: Vec<Node> = eval.args.iter().map(|a| Node::Iconst(*a as i64)).collect();
-    let body = self.lower_expr(&eval.func, &arg_nodes)?;
-
-    self.evals.push(EvalIR { body: body.clone() });
-
-    Ok(body)
-  }
-
-  fn visit_expr(&mut self, expr: &Expr) -> Result<Node, Lowerror> {
-    // standalone expr fold with no args context
-    self.lower_expr(expr, &[])
+  fn visit_eval(&mut self, eval: &Eval) -> Result<(), LowerError> {
+    self.lower_eval(eval)
   }
 }
 
@@ -235,7 +212,7 @@ impl Default for Lower {
   }
 }
 
-// peephole optimizations we can perform when folding Expr -> Node
+// peephole optimizations we can perform when folding `Expr` -> `Node`
 
 fn try_peephole_pred(base: &Expr, step: &Expr, args: &[Node]) -> Option<Node> {
   if matches!(base, Expr::Const { arity: 0, value: 0 }) && matches!(step, Expr::Id { k: 1, n: 2 }) {
@@ -372,24 +349,24 @@ fn try_peephole_mult(
   None
 }
 
-pub fn infer_arity(env: &HashMap<String, usize>, expr: &Expr) -> Result<usize, Lowerror> {
+pub fn infer_arity(env: &HashMap<String, usize>, expr: &Expr) -> Result<usize, LowerError> {
   match expr {
     Expr::Const { arity, .. } => Ok(*arity),
     Expr::Succ => Ok(1),
     Expr::Id { k, n } => {
       if *k < 1 || *k > *n {
-        return Err(Lowerror::InvalidProjection { k: *k, n: *n });
+        return Err(LowerError::InvalidProjection { k: *k, n: *n });
       }
       Ok(*n)
     }
     Expr::Ref(name) => env
       .get(name)
       .copied()
-      .ok_or_else(|| Lowerror::Undefined(name.clone())),
+      .ok_or_else(|| LowerError::Undefined(name.clone())),
     Expr::Cn { f, gs } => {
       let m = infer_arity(env, f)?;
       if gs.len() != m {
-        return Err(Lowerror::ArityMismatch {
+        return Err(LowerError::ArityMismatch {
           name: "Cn outer function".to_string(),
           expected: m,
           got: gs.len(),
@@ -401,7 +378,7 @@ pub fn infer_arity(env: &HashMap<String, usize>, expr: &Expr) -> Result<usize, L
       let n = infer_arity(env, &gs[0])?;
       for g in gs.iter().skip(1) {
         if infer_arity(env, g)? != n {
-          return Err(Lowerror::CnArityMismatch);
+          return Err(LowerError::CnArityMismatch);
         }
       }
       Ok(n)
@@ -411,14 +388,14 @@ pub fn infer_arity(env: &HashMap<String, usize>, expr: &Expr) -> Result<usize, L
       let sa = infer_arity(env, step)?;
       let expected = if ba == 0 { 2 } else { ba + 2 };
       if sa != expected {
-        return Err(Lowerror::PrStepArity { expected, got: sa });
+        return Err(LowerError::PrStepArity { expected, got: sa });
       }
       Ok(if ba == 0 { 1 } else { ba + 1 })
     }
     Expr::Mn { f } => {
       let inner = infer_arity(env, f)?;
       if inner < 1 {
-        return Err(Lowerror::MnArityTooSmall(inner));
+        return Err(LowerError::MnArityTooSmall(inner));
       }
       Ok(inner - 1)
     }
@@ -489,10 +466,8 @@ fn is_add_function(expr: &Expr, def_bodies: &HashMap<String, Expr>) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::ast::Visitable;
   use crate::lexer::Lexer;
   use crate::parser::Parser;
-  use crate::pass::Acceptor;
 
   fn parse_src(input: &str) -> Program {
     let lexer = Lexer::new(input);
@@ -502,14 +477,14 @@ mod tests {
 
   fn lower_src(input: &str) -> ProgramIR {
     let program = parse_src(input);
-    program.accept(Lower::new()).expect("lowering failed")
+    Lower::new().lower(&program).expect("lowering failed")
   }
 
   mod lower {
     use super::*;
 
     #[test]
-    fn lowers_const() {
+    fn lower_const() {
       let ir = lower_src("def f = const(1, 0);\neval f(42);");
       assert_eq!(ir.funcs.len(), 1);
       assert_eq!(ir.funcs[0].body, Node::Iconst(0));
@@ -518,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_succ() {
+    fn lower_succ() {
       let ir = lower_src("def f = s;\neval f(5);");
       assert_eq!(
         ir.funcs[0].body,
@@ -527,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_pred_peephole() {
+    fn lower_pred_peephole() {
       let ir = lower_src("def pred = Pr[const(0, 0), id(1,2)];\neval pred(5);");
       match &ir.funcs[0].body {
         Node::Select { .. } => {}
@@ -536,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_add_peephole() {
+    fn lower_add_peephole() {
       let ir = lower_src("def add = Pr[id(1,1), Cn[s, id(3,3)]];\neval add(3, 2);");
       assert_eq!(
         ir.funcs[0].body,
@@ -545,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_mult_peephole() {
+    fn lower_mult_peephole() {
       let ir = lower_src(
         "def z = const(1, 0);\n\
          def add = Pr[id(1,1), Cn[s, id(3,3)]];\n\
@@ -559,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_generic_pr_to_loop() {
+    fn lower_pr_to_loop() {
       let ir = lower_src(
         "def z = const(1, 0);\n\
          def add = Pr[id(1,1), Cn[s, id(3,3)]];\n\
@@ -574,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_mn_to_search() {
+    fn lower_mn_to_search() {
       let ir = lower_src(
         "def z = const(1, 0);\n\
          def pred = Pr[const(0, 0), id(1,2)];\n\
@@ -591,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_inline_combinator() {
+    fn lower_inline_combinator_eval() {
       let ir = lower_src("eval Cn[s, s](5);");
       assert_eq!(ir.funcs.len(), 0);
       assert_eq!(ir.evals.len(), 1);
@@ -608,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_sg_peephole() {
+    fn lower_sg_peephole() {
       let ir = lower_src(
         "def sg = Pr[const(0, 0), Cn[s, const(2, 0)]];\n\
          eval sg(0);",
@@ -620,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_sgbar_peephole() {
+    fn lower_sgbar_peephole() {
       let ir = lower_src(
         "def sgbar = Pr[const(0, 1), const(2, 0)];\n\
          eval sgbar(0);",
@@ -632,11 +607,11 @@ mod tests {
     }
 
     #[test]
-    fn arity_mismatch_in_eval() {
+    fn lower_arity_mismatch() {
       let program = parse_src("def f = Pr[id(1,1), Cn[s, id(3,3)]];\neval f(1, 2, 3);");
-      let err = program.accept(Lower::new()).unwrap_err();
+      let err = Lower::new().lower(&program).unwrap_err();
       match err {
-        Lowerror::ArityMismatch {
+        LowerError::ArityMismatch {
           expected: 2,
           got: 3,
           ..
@@ -645,36 +620,15 @@ mod tests {
       }
     }
 
-    mod acceptor {
-      use super::*;
-
-      #[test]
-      fn accept() {
-        let program = parse_src("def f = s;\neval f(5);");
-        let ir = program.accept(Lower::new()).unwrap();
-        assert_eq!(
-          ir.funcs[0].body,
-          Node::Iadd(Box::new(Node::Arg(0)), Box::new(Node::Iconst(1)))
-        );
-        assert_eq!(ir.evals.len(), 1);
-      }
-    }
-
-    mod visitor {
-      use super::*;
-
-      #[test]
-      fn fold() {
-        let program = parse_src("def f = s;");
-        let mut lower = Lower::new();
-        let result = program.fold(&mut lower).unwrap();
-        assert_eq!(result, Node::Iconst(0));
-        let ir = lower.finish();
-        assert_eq!(
-          ir.funcs[0].body,
-          Node::Iadd(Box::new(Node::Arg(0)), Box::new(Node::Iconst(1)))
-        );
-      }
+    #[test]
+    fn lower_consumes_self() {
+      let program = parse_src("def f = s;\neval f(5);");
+      let ir = Lower::new().lower(&program).unwrap();
+      assert_eq!(
+        ir.funcs[0].body,
+        Node::Iadd(Box::new(Node::Arg(0)), Box::new(Node::Iconst(1)))
+      );
+      assert_eq!(ir.evals.len(), 1);
     }
   }
 }

@@ -8,13 +8,12 @@ use cranelift_codegen::ir::{AbiParam, BlockArg, Function, InstBuilder, TrapCode,
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
-use cranelift_object::{ObjectBuilder, ObjectModule};
+use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 
 #[cfg(feature = "jit")]
 use cranelift_jit::{JITBuilder, JITModule};
 
-use crate::ir::{Cmp, EvalIR, FuncIR, Node, ProgramIR, Visitable, Visitor};
-use crate::pass::Pass;
+use crate::ir::{Cmp, EvalIR, FuncIR, Node, ProgramIR, Visitor};
 
 #[derive(thiserror::Error, Debug)]
 pub enum CodegenError {
@@ -46,7 +45,7 @@ impl From<cranelift_module::ModuleError> for CodegenError {
 }
 
 // borrow split context for emission
-// - borrows module and func_ids while some FunctionBuilder lives
+// - borrows module and func_ids while some `FunctionBuilder` lives
 struct EmitCtx<'a, M> {
   module: &'a mut M,
   func_ids: &'a HashMap<String, FuncId>,
@@ -60,7 +59,7 @@ impl<M> EmitCtx<'_, M>
 where
   M: Module,
 {
-  // walk tree and emit cranelift IR, returning resulting SSA value
+  // walk tree and emit cranelift ir, returning resulting ssa value
   fn emit_node(
     &mut self,
     builder: &mut FunctionBuilder,
@@ -397,6 +396,29 @@ where
     Ok(())
   }
 
+  // shared two-pass declare then define
+  fn declare_and_define(&mut self, funcs: &[FuncIR]) -> Result<(), CodegenError> {
+    // pass 1 - forward declarations
+    for func_ir in funcs {
+      let mut sig = self.module.make_signature();
+      for _ in 0..func_ir.arity {
+        sig.params.push(AbiParam::new(types::I64));
+      }
+      sig.returns.push(AbiParam::new(types::I64));
+      let func_id = self
+        .module
+        .declare_function(&func_ir.name, Linkage::Export, &sig)?;
+      self.func_ids.insert(func_ir.name.clone(), func_id);
+    }
+
+    // pass 2 - define function bodies
+    for func_ir in funcs {
+      self.build_func(func_ir)?;
+    }
+
+    Ok(())
+  }
+
   fn build_main(&mut self, evals: &[EvalIR]) -> Result<(), CodegenError> {
     let mut sig = self.module.make_signature();
     sig.returns.push(AbiParam::new(types::I32));
@@ -414,7 +436,7 @@ where
       builder.switch_to_block(entry);
 
       for eval in evals {
-        // eval bodies fully applied (args already Iconst), so func_args is empty
+        // eval bodies fully applied (args already `Iconst`), so func_args is empty
         let result = {
           let mut ctx = EmitCtx {
             module: &mut self.module,
@@ -450,52 +472,11 @@ where
   }
 }
 
-impl<M> Visitor<()> for Codegen<M>
-where
-  M: Module,
-{
-  type Error = CodegenError;
-
-  fn visit_program(&mut self, program: &ProgramIR) -> Result<(), CodegenError> {
-    // pass 1 - declare all functions (forward declarations)
-    for func_ir in &program.funcs {
-      let mut sig = self.module.make_signature();
-      for _ in 0..func_ir.arity {
-        sig.params.push(AbiParam::new(types::I64));
-      }
-      sig.returns.push(AbiParam::new(types::I64));
-      let func_id = self
-        .module
-        .declare_function(&func_ir.name, Linkage::Export, &sig)?;
-      self.func_ids.insert(func_ir.name.clone(), func_id);
-    }
-
-    // pass 2 - define function bodies
-    for func_ir in &program.funcs {
-      func_ir.fold(self)?;
-    }
-
-    Ok(())
-  }
-
-  fn visit_func(&mut self, func_ir: &FuncIR) -> Result<(), CodegenError> {
-    self.build_func(func_ir)
-  }
-
-  fn visit_eval(&mut self, _eval: &EvalIR) -> Result<(), CodegenError> {
-    Ok(())
-  }
-
-  fn visit_node(&mut self, _node: &Node) -> Result<(), CodegenError> {
-    Ok(())
-  }
-}
-
 // aot backend, compiles to object files
 pub type AotBackend = Codegen<ObjectModule>;
 
-impl Codegen<ObjectModule> {
-  // Create a new aot backend, targeting host machine
+impl AotBackend {
+  /// create a new aot backend, targeting host machine
   pub fn new_aot(opt_level: &str) -> Result<Self, CodegenError> {
     let mut settings_builder = settings::builder();
     settings_builder.set("opt_level", opt_level)?;
@@ -518,29 +499,45 @@ impl Codegen<ObjectModule> {
     Self::new(module)
   }
 
-  /// Consume the backend and write the object file to `path`
-  pub fn write_object_file(self, path: &Path) -> Result<(), CodegenError> {
-    use std::fs;
+  /// consume the backend, compile the ir, and return a `CompiledObject`
+  pub fn compile(mut self, ir: &ProgramIR) -> Result<CompiledObject, CodegenError> {
+    self.visit_program(ir)?;
     let product = self.module.finish();
-    let bytes = product.emit()?;
-    Ok(fs::write(path, bytes)?)
-  }
-
-  /// Consume backend and return raw object bytes
-  pub fn into_bytes(self) -> Result<Vec<u8>, CodegenError> {
-    let product = self.module.finish();
-    Ok(product.emit()?)
+    Ok(CompiledObject { product })
   }
 }
 
-impl Pass<ProgramIR> for Codegen<ObjectModule> {
-  type Output = Codegen<ObjectModule>;
+/// para :: `ProgramIR` -> `AotBackend`
+impl Visitor for AotBackend {
   type Error = CodegenError;
 
-  fn run(mut self, ir: &ProgramIR) -> Result<Codegen<ObjectModule>, CodegenError> {
-    ir.fold(&mut self)?;
+  fn visit_program(&mut self, ir: &ProgramIR) -> Result<(), CodegenError> {
+    self.declare_and_define(&ir.funcs)?;
     self.build_main(&ir.evals)?;
-    Ok(self)
+    Ok(())
+  }
+
+  fn visit_func(&mut self, func: &FuncIR) -> Result<(), CodegenError> {
+    self.build_func(func)
+  }
+}
+
+/// a compiled object file ready to be written or extracted as bytes
+pub struct CompiledObject {
+  product: ObjectProduct,
+}
+
+impl CompiledObject {
+  /// extract raw object bytes
+  pub fn into_bytes(self) -> Result<Vec<u8>, CodegenError> {
+    Ok(self.product.emit()?)
+  }
+
+  /// write the object file to `path`
+  pub fn write_to(self, path: &Path) -> Result<(), CodegenError> {
+    use std::fs;
+    let bytes = self.into_bytes()?;
+    Ok(fs::write(path, bytes)?)
   }
 }
 
@@ -549,8 +546,8 @@ impl Pass<ProgramIR> for Codegen<ObjectModule> {
 pub type JitBackend = Codegen<JITModule>;
 
 #[cfg(feature = "jit")]
-impl Codegen<JITModule> {
-  /// Create a new jit backend, targeting host machine
+impl JitBackend {
+  /// create a new jit backend, targeting host machine
   pub fn new_jit(opt_level: &str) -> Result<Self, CodegenError> {
     let mut settings_builder = settings::builder();
     settings_builder.set("opt_level", opt_level)?;
@@ -575,7 +572,16 @@ impl Codegen<JITModule> {
     Self::new(module)
   }
 
-  // compile each eval as standalone no argument function returning and i64
+  /// consume the backend, compile the ir, and return a `JitProgram`
+  pub fn compile(mut self, ir: &ProgramIR) -> Result<JitProgram, CodegenError> {
+    self.visit_program(ir)?;
+    Ok(JitProgram {
+      module: self.module,
+      eval_ids: self.eval_ids,
+    })
+  }
+
+  // compile each eval as standalone no-argument function returning an `i64`
   fn build_evals(&mut self, evals: &[EvalIR]) -> Result<(), CodegenError> {
     for (i, eval) in evals.iter().enumerate() {
       let name = format!("__robin_eval_{i}");
@@ -617,32 +623,45 @@ impl Codegen<JITModule> {
 
     Ok(())
   }
+}
 
-  // finalize all definitions and execute each eval function, returning results
+/// para :: `ProgramIR` -> `JitBackend`
+#[cfg(feature = "jit")]
+impl Visitor for JitBackend {
+  type Error = CodegenError;
+
+  fn visit_program(&mut self, ir: &ProgramIR) -> Result<(), CodegenError> {
+    self.declare_and_define(&ir.funcs)?;
+    self.build_evals(&ir.evals)?;
+    Ok(())
+  }
+
+  fn visit_func(&mut self, func: &FuncIR) -> Result<(), CodegenError> {
+    self.build_func(func)
+  }
+}
+
+/// a jit compiled program ready to be executed
+#[cfg(feature = "jit")]
+pub struct JitProgram {
+  module: JITModule,
+  eval_ids: Vec<FuncId>,
+}
+
+#[cfg(feature = "jit")]
+impl JitProgram {
+  /// finalize all definitions and execute each eval function, returning results
   pub fn run_evals(&mut self) -> Result<Vec<i64>, CodegenError> {
     self.module.finalize_definitions()?;
-
     let mut results = Vec::with_capacity(self.eval_ids.len());
     for &func_id in &self.eval_ids {
       use std::mem;
       let code_ptr = self.module.get_finalized_function(func_id);
-      // safety: we just compiled this function with signature () -> i64
+      // safety: we just compiled this function with signature `() -> i64`
       let f: unsafe extern "C" fn() -> i64 = unsafe { mem::transmute(code_ptr) };
       results.push(unsafe { f() });
     }
     Ok(results)
-  }
-}
-
-#[cfg(feature = "jit")]
-impl Pass<ProgramIR> for Codegen<JITModule> {
-  type Output = Codegen<JITModule>;
-  type Error = CodegenError;
-
-  fn run(mut self, ir: &ProgramIR) -> Result<Codegen<JITModule>, CodegenError> {
-    ir.fold(&mut self)?;
-    self.build_evals(&ir.evals)?;
-    Ok(self)
   }
 }
 
@@ -652,7 +671,6 @@ mod tests {
   use crate::lexer::Lexer;
   use crate::lower::Lower;
   use crate::parser::Parser;
-  use crate::pass::Acceptor;
 
   mod aot_backend {
     use super::*;
@@ -660,12 +678,14 @@ mod tests {
     fn compile(input: &str) -> Vec<u8> {
       let lexer = Lexer::new(input);
       let parser = Parser::new(lexer);
-      let program = parser.parse().expect("parse failed");
-      let ir = program.accept(Lower::new()).expect("lowering failed");
-      let backend = ir
-        .accept(AotBackend::new_aot("speed").expect("backend new failed"))
-        .expect("compile failed");
-      backend.into_bytes().expect("emit failed")
+      let program = parser.parse().expect("program parses");
+      let ir = Lower::new().lower(&program).expect("program lowers");
+      AotBackend::new_aot("speed")
+        .expect("backend created")
+        .compile(&ir)
+        .expect("compiles")
+        .into_bytes()
+        .expect("emits")
     }
 
     fn compile_ok(input: &str) {
@@ -674,32 +694,32 @@ mod tests {
     }
 
     #[test]
-    fn emits_const() {
+    fn compile_const() {
       compile_ok("def f = const(1, 0);\neval f(42);");
     }
 
     #[test]
-    fn emits_succ() {
+    fn compile_succ() {
       compile_ok("def f = s;\neval f(5);");
     }
 
     #[test]
-    fn emits_composition() {
+    fn compile_composition() {
       compile_ok("def f = Cn[s, s];\neval f(5);");
     }
 
     #[test]
-    fn emits_pred() {
+    fn compile_pred() {
       compile_ok("def pred = Pr[const(0, 0), id(1,2)];\neval pred(5);");
     }
 
     #[test]
-    fn emits_add() {
+    fn compile_add() {
       compile_ok("def add = Pr[id(1,1), Cn[s, id(3,3)]];\neval add(3, 2);");
     }
 
     #[test]
-    fn emits_monus() {
+    fn compile_monus() {
       compile_ok(
         "def pred = Pr[const(0, 0), id(1,2)];\n\
          def monus = Pr[id(1,1), Cn[pred, id(3,3)]];\n\
@@ -708,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_pr_loop_generic() {
+    fn compile_pr_loop() {
       compile_ok(
         "def z = const(1, 0);\n\
          def pred = Pr[const(0, 0), id(1,2)];\n\
@@ -720,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_mn_search() {
+    fn compile_mn_search() {
       compile_ok(
         "def z = const(1, 0);\n\
          def pred = Pr[const(0, 0), id(1,2)];\n\
@@ -733,17 +753,17 @@ mod tests {
     }
 
     #[test]
-    fn module_has_main() {
+    fn compile_empty_main() {
       compile_ok("def f = const(1, 0);");
     }
 
     #[test]
-    fn eval_inline_combinator() {
+    fn compile_inline_combinator() {
       compile_ok("eval Cn[s, s](5);");
     }
 
     #[test]
-    fn emits_sg() {
+    fn compile_sg() {
       compile_ok(
         "def sg = Pr[const(0, 0), Cn[s, const(2, 0)]];\n\
          eval sg(0);\n\
@@ -752,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_sgbar() {
+    fn compile_sgbar() {
       compile_ok(
         "def sgbar = Pr[const(0, 1), const(2, 0)];\n\
          eval sgbar(0);\n\
@@ -761,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_mult_peephole() {
+    fn compile_mult_peephole() {
       compile_ok(
         "def z = const(1, 0);\n\
          def add = Pr[id(1,1), Cn[s, id(3,3)]];\n\
@@ -771,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_fact_with_inlining() {
+    fn compile_fact() {
       compile_ok(
         "def z = const(1, 0);\n\
          def add = Pr[id(1,1), Cn[s, id(3,3)]];\n\
@@ -789,26 +809,27 @@ mod tests {
     fn jit_eval(input: &str) -> Vec<i64> {
       let lexer = Lexer::new(input);
       let parser = Parser::new(lexer);
-      let program = parser.parse().expect("parse failed");
-      let ir = program.accept(Lower::new()).expect("lowering failed");
-      let mut backend = ir
-        .accept(JitBackend::new_jit("speed").expect("jit new failed"))
-        .expect("jit compile failed");
-      backend.run_evals().expect("jit run failed")
+      let program = parser.parse().expect("program parses");
+      let ir = Lower::new().lower(&program).expect("program lowers");
+      let mut jit = JitBackend::new_jit("speed")
+        .expect("jit created")
+        .compile(&ir)
+        .expect("compiles");
+      jit.run_evals().expect("jit evals run")
     }
 
     #[test]
-    fn jit_const() {
+    fn eval_const() {
       assert_eq!(jit_eval("def f = const(1, 0);\neval f(42);"), vec![0]);
     }
 
     #[test]
-    fn jit_succ() {
+    fn eval_succ() {
       assert_eq!(jit_eval("def f = s;\neval f(5);"), vec![6]);
     }
 
     #[test]
-    fn jit_add() {
+    fn eval_add() {
       assert_eq!(
         jit_eval("def add = Pr[id(1,1), Cn[s, id(3,3)]];\neval add(3, 2);"),
         vec![5]
@@ -816,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn jit_mult() {
+    fn eval_mult() {
       assert_eq!(
         jit_eval(
           "def z = const(1, 0);\n\
@@ -829,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn jit_multiple_evals() {
+    fn eval_multiple() {
       assert_eq!(
         jit_eval("def f = s;\neval f(0);\neval f(5);\neval f(99);"),
         vec![1, 6, 100]
@@ -837,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn jit_search() {
+    fn eval_search() {
       let results = jit_eval(
         "def z = const(1, 0);\n\
          def pred = Pr[const(0, 0), id(1,2)];\n\

@@ -1,22 +1,72 @@
 use std::fmt;
 
-/// Catamorphism/abstract-fold over middle end IR
-pub trait Visitor<T> {
+/// paramorphic algebra over the ir
+///
+/// ```text
+/// para :: (Base ProgramIR (ProgramIR, a) -> a) -> ProgramIR -> a
+/// ```
+///
+/// each method is one case of the base functor
+pub trait Visitor {
   type Error;
 
-  fn visit_program(&mut self, p: &ProgramIR) -> Result<T, Self::Error>;
-  fn visit_func(&mut self, f: &FuncIR) -> Result<T, Self::Error>;
-  fn visit_eval(&mut self, e: &EvalIR) -> Result<T, Self::Error>;
-  fn visit_node(&mut self, n: &Node) -> Result<T, Self::Error>;
+  fn visit_program(&mut self, ir: &ProgramIR) -> Result<(), Self::Error> {
+    for func in &ir.funcs {
+      self.visit_func(func)?;
+    }
+    for eval in &ir.evals {
+      self.visit_eval(eval)?;
+    }
+    Ok(())
+  }
+
+  fn visit_func(&mut self, func: &FuncIR) -> Result<(), Self::Error> {
+    self.visit_node(&func.body)
+  }
+
+  fn visit_eval(&mut self, eval: &EvalIR) -> Result<(), Self::Error> {
+    self.visit_node(&eval.body)
+  }
+
+  fn visit_node(&mut self, node: &Node) -> Result<(), Self::Error> {
+    match node {
+      Node::Iadd(a, b) | Node::Isub(a, b) | Node::Imul(a, b) => {
+        self.visit_node(a)?;
+        self.visit_node(b)?;
+      }
+      Node::Icmp(_, a, b) => {
+        self.visit_node(a)?;
+        self.visit_node(b)?;
+      }
+      Node::Select {
+        cond,
+        then_val,
+        else_val,
+      } => {
+        self.visit_node(cond)?;
+        self.visit_node(then_val)?;
+        self.visit_node(else_val)?;
+      }
+      Node::Call { args, .. } => {
+        for arg in args {
+          self.visit_node(arg)?;
+        }
+      }
+      Node::Loop { bound, init, body } => {
+        self.visit_node(bound)?;
+        self.visit_node(init)?;
+        self.visit_node(body)?;
+      }
+      Node::Search { body, .. } => {
+        self.visit_node(body)?;
+      }
+      Node::Iconst(_) | Node::Arg(_) | Node::Counter(_) | Node::Acc(_) | Node::Probe(_) => {}
+    }
+    Ok(())
+  }
 }
 
-pub trait Visitable<T> {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>;
-}
-
-/// comparison operators for the IR
+/// comparison operators for the ir
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmp {
   Eq,
@@ -45,7 +95,7 @@ impl fmt::Display for Cmp {
 /// arity inference, ref resolution, peephole optimization, and inlining are
 /// all applied during lowering to this crappy ir
 ///
-/// loop variables (Counter, Acc, Probe) use de bruijn depth indices to
+/// loop variables (`Counter`, `Acc`, `Probe`) use de bruijn depth indices to
 /// handle nesting properly, depth of 0 means innermost enclosing loop/search,
 /// depth of 1 means next outer layer, etc etc
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +115,7 @@ pub enum Node {
   /// integer multiplication
   Imul(Box<Node>, Box<Node>),
 
-  /// comparison (produces a boolean-like value for Select)
+  /// comparison (produces a boolean-like value for `Select`)
   Icmp(Cmp, Box<Node>, Box<Node>),
 
   /// conditional select, if cond then then_val else else_val
@@ -82,36 +132,27 @@ pub enum Node {
   ///
   /// iterates `bound` times starting with `init` as the accumulator...
   /// `bound` and `init` are evaluated in the enclosing scope, but `body`
-  /// is evaluated in a new scope where Counter(0) and Acc(0) are bound...
+  /// is evaluated in a new scope where `Counter(0)` and `Acc(0)` are bound...
   Loop {
     bound: Box<Node>,
     init: Box<Node>,
     body: Box<Node>,
   },
 
-  /// loop counter at de bruijn depth (0 is innermost Loop)
+  /// loop counter at de bruijn depth (0 is innermost `Loop`)
   Counter(usize),
 
-  /// loop accumulator at de bruijn depth (0 is innermost Loop)
+  /// loop accumulator at de bruijn depth (0 is innermost `Loop`)
   Acc(usize),
 
   /// unbounded search (from mu-minimization)
   ///
   /// searches for the least y s.t. f is 0
-  /// - `body` is evaluated in a new scope where Probe(0) is bound
+  /// - `body` is evaluated in a new scope where `Probe(0)` is bound
   Search { body: Box<Node>, limit: i64 },
 
-  /// search variable at de bruijn depth (again, 0 innermost Search)
+  /// search variable at de bruijn depth (again, 0 innermost `Search`)
   Probe(usize),
-}
-
-impl<T> Visitable<T> for Node {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_node(self)
-  }
 }
 
 impl fmt::Display for Node {
@@ -145,7 +186,7 @@ impl fmt::Display for Node {
   }
 }
 
-/// A compiled `def` statement
+/// a compiled `def` statement
 #[derive(Debug)]
 pub struct FuncIR {
   pub name: String,
@@ -153,48 +194,21 @@ pub struct FuncIR {
   pub body: Node,
 }
 
-impl<T> Visitable<T> for FuncIR {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_func(self)
-  }
-}
-
-/// A fully applied `eval` statement
+/// a fully applied `eval` statement
 #[derive(Debug)]
 pub struct EvalIR {
   pub body: Node,
 }
 
-impl<T> Visitable<T> for EvalIR {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_eval(self)
-  }
-}
-
-/// Lowered program consists of all function definitions and eval statements
+/// lowered program consists of all function definitions and eval statements
 #[derive(Debug)]
 pub struct ProgramIR {
   pub funcs: Vec<FuncIR>,
   pub evals: Vec<EvalIR>,
 }
 
-impl<T> Visitable<T> for ProgramIR {
-  fn fold<V>(&self, visitor: &mut V) -> Result<T, V::Error>
-  where
-    V: Visitor<T>,
-  {
-    visitor.visit_program(self)
-  }
-}
-
-// increment all Counter/Acc depths by some amount, useful for pushing nodes down through nested Loops
-// - doesnt touch Probe or Arg since they live in separate scopes
+// increment all `Counter`/`Acc` depths by some amount, useful for pushing nodes down through nested `Loop`s
+// - doesnt touch `Probe` or `Arg` since they live in separate scopes
 pub fn shift_loop_depth(node: &Node, delta: usize) -> Node {
   match node {
     Node::Counter(d) => Node::Counter(d + delta),
@@ -248,8 +262,8 @@ pub fn shift_loop_depth(node: &Node, delta: usize) -> Node {
   }
 }
 
-// increment all Probe depths by some amount, useful for pushing nodes down through nested Search
-// - againt, doesnt touch Counter/Acc or Arg, they live in separate scopes
+// increment all `Probe` depths by some amount, useful for pushing nodes down through nested `Search`
+// - again, doesnt touch `Counter`/`Acc` or `Arg`, they live in separate scopes
 pub fn shift_search_depth(node: &Node, delta: usize) -> Node {
   match node {
     Node::Probe(d) => Node::Probe(d + delta),
@@ -310,8 +324,31 @@ mod tests {
   mod node {
     use super::*;
 
+    mod display {
+      use super::*;
+
+      #[test]
+      fn simple_nodes() {
+        assert_eq!(Node::Iconst(42).to_string(), "42");
+        assert_eq!(Node::Arg(0).to_string(), "arg(0)");
+        assert_eq!(Node::Counter(0).to_string(), "counter(0)");
+        assert_eq!(Node::Acc(1).to_string(), "acc(1)");
+        assert_eq!(Node::Probe(0).to_string(), "probe(0)");
+      }
+
+      #[test]
+      fn compound_node() {
+        let node = Node::Iadd(Box::new(Node::Arg(0)), Box::new(Node::Iconst(1)));
+        assert_eq!(node.to_string(), "iadd(arg(0), 1)");
+      }
+    }
+  }
+
+  mod shift_loop_depth {
+    use super::*;
+
     #[test]
-    fn shift_loop_depth_increments_counter_and_acc() {
+    fn increment_counter_and_acc() {
       let node = Node::Iadd(Box::new(Node::Counter(0)), Box::new(Node::Acc(0)));
       let shifted = shift_loop_depth(&node, 1);
       assert_eq!(
@@ -321,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_loop_depth_does_not_touch_probe() {
+    fn skip_probe() {
       let node = Node::Iadd(Box::new(Node::Counter(0)), Box::new(Node::Probe(0)));
       let shifted = shift_loop_depth(&node, 1);
       assert_eq!(
@@ -331,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_loop_depth_does_not_touch_arg() {
+    fn skip_arg() {
       let node = Node::Iadd(Box::new(Node::Arg(0)), Box::new(Node::Counter(2)));
       let shifted = shift_loop_depth(&node, 1);
       assert_eq!(
@@ -341,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_loop_depth_recurses_into_loop_body() {
+    fn recurse_into_loop_body() {
       let node = Node::Loop {
         bound: Box::new(Node::Arg(0)),
         init: Box::new(Node::Counter(0)),
@@ -363,34 +400,19 @@ mod tests {
         }
       );
     }
+  }
+
+  mod shift_search_depth {
+    use super::*;
 
     #[test]
-    fn shift_search_depth_increments_probe() {
+    fn increment_probe() {
       let node = Node::Iadd(Box::new(Node::Probe(0)), Box::new(Node::Counter(0)));
       let shifted = shift_search_depth(&node, 1);
       assert_eq!(
         shifted,
         Node::Iadd(Box::new(Node::Probe(1)), Box::new(Node::Counter(0)))
       );
-    }
-
-    mod display {
-      use super::*;
-
-      #[test]
-      fn simple_nodes() {
-        assert_eq!(Node::Iconst(42).to_string(), "42");
-        assert_eq!(Node::Arg(0).to_string(), "arg(0)");
-        assert_eq!(Node::Counter(0).to_string(), "counter(0)");
-        assert_eq!(Node::Acc(1).to_string(), "acc(1)");
-        assert_eq!(Node::Probe(0).to_string(), "probe(0)");
-      }
-
-      #[test]
-      fn compound_node() {
-        let node = Node::Iadd(Box::new(Node::Arg(0)), Box::new(Node::Iconst(1)));
-        assert_eq!(node.to_string(), "iadd(arg(0), 1)");
-      }
     }
   }
 }

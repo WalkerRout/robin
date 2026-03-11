@@ -9,7 +9,6 @@ use lib_robin_core::backend::cranelift::AotBackend;
 use lib_robin_core::lexer::Lexer;
 use lib_robin_core::lower::Lower;
 use lib_robin_core::parser::Parser;
-use lib_robin_core::pass::Acceptor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EmitType {
@@ -94,24 +93,23 @@ fn main() -> Result<(), anyhow::Error> {
   })?;
 
   // lower ast into mid ir
-  let ir = program.accept(Lower::new())?;
+  let ir = Lower::new().lower(&program)?;
 
   // jit compile and run in process, print results from rust
   #[cfg(feature = "jit")]
   if args.emit == EmitType::Jit {
     use lib_robin_core::backend::cranelift::JitBackend;
 
-    let mut backend = ir.accept(JitBackend::new_jit(opt_str)?)?;
-    let results = backend.run_evals()?;
+    let mut jit = JitBackend::new_jit(opt_str)?.compile(&ir)?;
+    let results = jit.run_evals()?;
     for result in results {
       println!("{result}");
     }
-    // return early to avoid other codepath
     return Ok(());
   }
 
   // aot compile ir to native object code
-  let backend = ir.accept(AotBackend::new_aot(opt_str)?)?;
+  let compiled = AotBackend::new_aot(opt_str)?.compile(&ir)?;
 
   // determine output paths
   let input_path = Path::new(&args.input);
@@ -129,7 +127,7 @@ fn main() -> Result<(), anyhow::Error> {
   };
 
   // spit out the .o file
-  backend.write_object_file(Path::new(&obj_path))?;
+  compiled.write_to(Path::new(&obj_path))?;
 
   if args.emit == EmitType::Obj {
     eprintln!("compiled: {obj_path}");
