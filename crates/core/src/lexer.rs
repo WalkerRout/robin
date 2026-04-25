@@ -3,8 +3,6 @@ use std::str::Chars;
 
 use crate::token::{Kind as TokenKind, Token, lookup_identifier};
 
-const LOOKAHEAD: usize = 2;
-
 fn is_digit(c: char) -> bool {
   c.is_ascii_digit()
 }
@@ -23,16 +21,19 @@ pub struct Lexer<'src> {
   buf: VecDeque<char>,
 }
 
+const LOOKAHEAD: usize = 2;
+
 impl<'src> Lexer<'src> {
   #[must_use]
   pub fn new(source: &'src str) -> Self {
+    use std::borrow::BorrowMut;
     let mut chars = source.chars();
-    let buf = (&mut chars).take(LOOKAHEAD).collect();
+    let buf = chars.borrow_mut().take(LOOKAHEAD).collect();
     Self { chars, buf }
   }
 
   pub fn next_token(&mut self) -> Option<Token> {
-    skip_whitespace_and_comments(self);
+    let () = skip_whitespace_and_comments(self)?;
     let ch = self.peek()?;
     match ch {
       '=' => eat(self, TokenKind::Assign),
@@ -49,7 +50,8 @@ impl<'src> Lexer<'src> {
   }
 
   fn peek(&self) -> Option<char> {
-    self.buf.front().copied()
+    #[allow(clippy::get_first)]
+    self.buf.get(0).copied()
   }
 
   fn peek2(&self) -> Option<char> {
@@ -71,39 +73,43 @@ fn eat(lexer: &mut Lexer, kind: TokenKind) -> Option<Token> {
 }
 
 fn eat_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool, kind: TokenKind) -> Option<Token> {
-  let literal = take_while(lexer, pred);
+  let literal = take_while(lexer, pred)?;
   (!literal.is_empty()).then(|| Token::new(kind, literal))
 }
 
 fn eat_word(lexer: &mut Lexer) -> Option<Token> {
-  let literal = take_while(lexer, is_word_continue);
+  let literal = take_while(lexer, is_word_continue)?;
   let kind = lookup_identifier(&literal);
   Some(Token::new(kind, literal))
 }
 
-fn take_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool) -> String {
+fn take_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool) -> Option<String> {
   let mut buffer = String::new();
   while lexer.peek().is_some_and(&pred) {
-    buffer.push(lexer.advance().unwrap());
+    // never errors, compiler knows peek is always some...
+    buffer.push(lexer.advance()?);
   }
-  buffer
+  Some(buffer)
 }
 
-fn skip_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool) {
+fn skip_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool) -> Option<()> {
   while lexer.peek().is_some_and(&pred) {
-    lexer.advance();
+    // same shit as take_while
+    let _ = lexer.advance()?;
   }
+  Some(())
 }
 
-fn skip_whitespace_and_comments(lexer: &mut Lexer) {
+fn skip_whitespace_and_comments(lexer: &mut Lexer) -> Option<()> {
   loop {
-    skip_while(lexer, char::is_whitespace);
+    let () = skip_while(lexer, char::is_whitespace)?;
     if lexer.peek() == Some('/') && lexer.peek2() == Some('/') {
-      skip_while(lexer, |c| c != '\n');
+      let () = skip_while(lexer, |c| c != '\n')?;
       continue;
     }
     break;
   }
+  Some(())
 }
 
 impl Iterator for Lexer<'_> {
