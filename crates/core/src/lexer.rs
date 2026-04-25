@@ -1,87 +1,108 @@
-use std::iter::Peekable;
+use std::collections::VecDeque;
 use std::str::Chars;
 
 use crate::token::{Kind as TokenKind, Token, lookup_identifier};
 
+const LOOKAHEAD: usize = 2;
+
+fn is_digit(c: char) -> bool {
+  c.is_ascii_digit()
+}
+
+fn is_word_start(c: char) -> bool {
+  c.is_alphabetic() || c == '_'
+}
+
+fn is_word_continue(c: char) -> bool {
+  c.is_alphanumeric() || c == '_'
+}
+
 #[derive(Debug, Clone)]
 pub struct Lexer<'src> {
-  peekable: Peekable<Chars<'src>>,
+  chars: Chars<'src>,
+  buf: VecDeque<char>,
 }
 
 impl<'src> Lexer<'src> {
   #[must_use]
   pub fn new(source: &'src str) -> Self {
-    Self {
-      peekable: source.chars().peekable(),
-    }
+    let mut chars = source.chars();
+    let buf = (&mut chars).take(LOOKAHEAD).collect();
+    Self { chars, buf }
   }
 
-  fn next_token(&mut self) -> Option<Token> {
-    self.skip_whitespace_and_comments();
-    let ch = self.peek_char()?;
+  pub fn next_token(&mut self) -> Option<Token> {
+    skip_whitespace_and_comments(self);
+    let ch = self.peek()?;
     match ch {
-      '=' => self.eat(TokenKind::Assign),
-      ',' => self.eat(TokenKind::Comma),
-      ';' => self.eat(TokenKind::Semicolon),
-      '(' => self.eat(TokenKind::LParen),
-      ')' => self.eat(TokenKind::RParen),
-      '[' => self.eat(TokenKind::LBracket),
-      ']' => self.eat(TokenKind::RBracket),
-      '0'..='9' => self.eat_number(),
-      c if c.is_alphabetic() || c == '_' => self.eat_word(),
-      _ => self.eat(TokenKind::Unknown),
+      '=' => eat(self, TokenKind::Assign),
+      ',' => eat(self, TokenKind::Comma),
+      ';' => eat(self, TokenKind::Semicolon),
+      '(' => eat(self, TokenKind::LParen),
+      ')' => eat(self, TokenKind::RParen),
+      '[' => eat(self, TokenKind::LBracket),
+      ']' => eat(self, TokenKind::RBracket),
+      c if is_digit(c) => eat_while(self, is_digit, TokenKind::Int),
+      c if is_word_start(c) => eat_word(self),
+      _ => eat(self, TokenKind::Unknown),
     }
   }
 
-  fn eat(&mut self, kind: TokenKind) -> Option<Token> {
-    let c = self.peekable.next()?;
-    Some(Token::new(kind, c))
+  fn peek(&self) -> Option<char> {
+    self.buf.front().copied()
   }
 
-  fn eat_number(&mut self) -> Option<Token> {
-    let mut buffer = String::new();
-    while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
-      buffer.push(self.peekable.next()?);
+  fn peek2(&self) -> Option<char> {
+    self.buf.get(1).copied()
+  }
+
+  fn advance(&mut self) -> Option<char> {
+    let c = self.buf.pop_front()?;
+    if let Some(next) = self.chars.next() {
+      self.buf.push_back(next);
     }
-    Some(Token::new(TokenKind::Int, buffer))
+    Some(c)
   }
+}
 
-  fn eat_word(&mut self) -> Option<Token> {
-    let mut buffer = String::new();
-    while self
-      .peek_char()
-      .is_some_and(|c| c.is_alphanumeric() || c == '_')
-    {
-      buffer.push(self.peekable.next()?);
+fn eat(lexer: &mut Lexer, kind: TokenKind) -> Option<Token> {
+  let c = lexer.advance()?;
+  Some(Token::new(kind, c))
+}
+
+fn eat_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool, kind: TokenKind) -> Option<Token> {
+  let literal = take_while(lexer, pred);
+  (!literal.is_empty()).then(|| Token::new(kind, literal))
+}
+
+fn eat_word(lexer: &mut Lexer) -> Option<Token> {
+  let literal = take_while(lexer, is_word_continue);
+  let kind = lookup_identifier(&literal);
+  Some(Token::new(kind, literal))
+}
+
+fn take_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool) -> String {
+  let mut buffer = String::new();
+  while lexer.peek().is_some_and(&pred) {
+    buffer.push(lexer.advance().unwrap());
+  }
+  buffer
+}
+
+fn skip_while(lexer: &mut Lexer, pred: impl Fn(char) -> bool) {
+  while lexer.peek().is_some_and(&pred) {
+    lexer.advance();
+  }
+}
+
+fn skip_whitespace_and_comments(lexer: &mut Lexer) {
+  loop {
+    skip_while(lexer, char::is_whitespace);
+    if lexer.peek() == Some('/') && lexer.peek2() == Some('/') {
+      skip_while(lexer, |c| c != '\n');
+      continue;
     }
-    let kind = lookup_identifier(buffer.as_str());
-    Some(Token::new(kind, buffer))
-  }
-
-  fn peek_char(&mut self) -> Option<char> {
-    self.peekable.peek().copied()
-  }
-
-  fn skip_whitespace_and_comments(&mut self) {
-    loop {
-      // skip whitespace
-      while self.peek_char().is_some_and(char::is_whitespace) {
-        self.peekable.next();
-      }
-      // skip // line comments
-      if self.peek_char() == Some('/') {
-        let mut clone = self.peekable.clone();
-        clone.next();
-        if clone.peek() == Some(&'/') {
-          // consume until end of line
-          while self.peek_char().is_some_and(|c| c != '\n') {
-            self.peekable.next();
-          }
-          continue; // check for more whitespace/comments
-        }
-      }
-      break;
-    }
+    break;
   }
 }
 

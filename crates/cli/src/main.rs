@@ -99,7 +99,6 @@ fn main() -> Result<(), anyhow::Error> {
   #[cfg(feature = "jit")]
   if args.emit == EmitType::Jit {
     use lib_robin_core::backend::cranelift::JitBackend;
-
     let mut jit = JitBackend::new_jit(opt_str)?.compile(&ir)?;
     let results = jit.run_evals()?;
     for result in results {
