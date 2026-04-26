@@ -1,4 +1,4 @@
-use std::iter::Peekable;
+use std::collections::VecDeque;
 use std::mem;
 
 use crate::ast::{Decl, Def, Eval, Expr, Program};
@@ -9,82 +9,70 @@ pub enum ParserError {
   #[error("ran out of input while parsing")]
   UnexpectedEof,
 
-  #[error("unexpected token: {0:?}")]
+  #[error("unexpected token - {0:?}")]
   UnexpectedToken(Token),
 
   #[error("expected {expected}, got {actual:?}")]
   Expected { expected: String, actual: Token },
 
-  #[error("invalid integer literal: {0:?}")]
+  #[error("invalid integer literal - {0:?}")]
   InvalidInteger(Token),
 }
 
 #[derive(Debug, Clone)]
-pub struct Parser<I>
-where
-  I: Iterator<Item = Token>,
-{
-  tokens: Peekable<I>,
+pub struct Parser<I> {
+  tokens: I,
+  buf: VecDeque<Token>,
   errors: Vec<ParserError>,
 }
+
+const LOOKAHEAD: usize = 1;
 
 impl<I> Parser<I>
 where
   I: Iterator<Item = Token>,
 {
-  pub fn new(tokens: I) -> Self {
+  pub fn new(mut tokens: I) -> Self {
+    use std::borrow::BorrowMut;
+    let buf = tokens.borrow_mut().take(LOOKAHEAD).collect();
     Self {
-      tokens: tokens.peekable(),
+      tokens,
+      buf,
       errors: Vec::new(),
     }
   }
 
-  /// Parses a stream of tokens into a `Program` AST node
   pub fn parse(mut self) -> Result<Program, Vec<ParserError>> {
-    match self.parse_program() {
-      Some(program) => Ok(program),
-      None => Err(mem::take(&mut self.errors)),
+    let mut decls = Vec::new();
+    while self.peek().is_some() && !self.peek_is(TokenKind::Eof) {
+      let decl = eat_decl(&mut self);
+      match self.record(decl) {
+        Some(d) => decls.push(d),
+        None => synchronize(&mut self),
+      }
+    }
+
+    if self.errors.is_empty() {
+      Ok(Program { decls })
+    } else {
+      Err(mem::take(&mut self.errors))
     }
   }
 
-  fn next(&mut self) -> Option<Token> {
-    self.tokens.next()
+  fn peek(&self) -> Option<&Token> {
+    self.buf.front()
   }
 
-  fn next_eof(&mut self) -> Result<Token, ParserError> {
-    self.next().ok_or(ParserError::UnexpectedEof)
-  }
-
-  fn peek(&mut self) -> Option<&Token> {
-    self.tokens.peek()
-  }
-
-  fn peek_eof(&mut self) -> Result<&Token, ParserError> {
-    self.peek().ok_or(ParserError::UnexpectedEof)
-  }
-
-  fn peek_is(&mut self, kind: TokenKind) -> bool {
+  fn peek_is(&self, kind: TokenKind) -> bool {
     matches!(self.peek(), Some(t) if t.kind == kind)
   }
 
-  fn eat(&mut self, expected: TokenKind) -> Result<Token, ParserError> {
-    let token = self.next_eof()?;
-    if token.kind == expected {
-      Ok(token)
-    } else {
-      Err(ParserError::Expected {
-        expected: expected.to_string(),
-        actual: token,
-      })
+  fn advance(&mut self) -> Option<Token> {
+    let t = self.buf.pop_front()?;
+    if let Some(next) = self.tokens.next() {
+      self.buf.push_back(next);
     }
-  }
-
-  fn eat_int(&mut self) -> Result<u64, ParserError> {
-    let token = self.eat(TokenKind::Int)?;
-    token
-      .literal
-      .parse::<u64>()
-      .map_err(|_| ParserError::InvalidInteger(token))
+    Some(t)
   }
 
   fn record<T>(&mut self, result: Result<T, ParserError>) -> Option<T> {
@@ -96,152 +84,192 @@ where
       }
     }
   }
+}
 
-  fn synchronize(&mut self) {
-    while let Some(token) = self.peek() {
-      if token.kind == TokenKind::Semicolon {
-        self.next();
-        return;
-      }
-      self.next();
-    }
-  }
+fn advance_eof<I>(parser: &mut Parser<I>) -> Result<Token, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  parser.advance().ok_or(ParserError::UnexpectedEof)
+}
 
-  fn parse_comma_separated<T>(
-    &mut self,
-    terminator: TokenKind,
-    mut parse_element: impl FnMut(&mut Self) -> Result<T, ParserError>,
-  ) -> Result<Vec<T>, ParserError> {
-    let mut elements = Vec::new();
-    if self.peek_is(terminator) {
-      return Ok(elements);
-    }
-    loop {
-      elements.push(parse_element(self)?);
-      match self.peek() {
-        Some(Token { kind, .. }) if *kind == terminator => break,
-        Some(Token {
-          kind: TokenKind::Comma,
-          ..
-        }) => {
-          let _ = self.eat(TokenKind::Comma)?;
-          if self.peek_is(terminator) {
-            break;
-          }
-        }
-        _ => return Err(ParserError::UnexpectedToken(self.peek_eof()?.clone())),
-      }
-    }
-    Ok(elements)
-  }
+fn peek_eof<I>(parser: &mut Parser<I>) -> Result<&Token, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  parser.peek().ok_or(ParserError::UnexpectedEof)
+}
 
-  fn parse_program(&mut self) -> Option<Program> {
-    let mut decls = Vec::new();
-
-    while self.peek().is_some() && !self.peek_is(TokenKind::Eof) {
-      let decl = self.parse_decl();
-      match self.record(decl) {
-        Some(d) => decls.push(d),
-        None => self.synchronize(),
-      }
-    }
-
-    if self.errors.is_empty() {
-      Some(Program { decls })
-    } else {
-      None
-    }
-  }
-
-  fn parse_decl(&mut self) -> Result<Decl, ParserError> {
-    match self.peek_eof()?.kind {
-      TokenKind::Def => self.parse_def().map(Into::into),
-      TokenKind::Eval => self.parse_eval().map(Into::into),
-      _ => Err(ParserError::UnexpectedToken(self.peek_eof()?.clone())),
-    }
-  }
-
-  fn parse_def(&mut self) -> Result<Def, ParserError> {
-    let _ = self.eat(TokenKind::Def)?;
-    let name_token = self.eat(TokenKind::Ident)?;
-    let _ = self.eat(TokenKind::Assign)?;
-    let body = self.parse_expr()?;
-    let _ = self.eat(TokenKind::Semicolon)?;
-    Ok(Def {
-      name: name_token.literal,
-      body,
+fn eat<I>(parser: &mut Parser<I>, expected: TokenKind) -> Result<Token, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  let token = advance_eof(parser)?;
+  if token.kind == expected {
+    Ok(token)
+  } else {
+    Err(ParserError::Expected {
+      expected: expected.to_string(),
+      actual: token,
     })
   }
+}
 
-  fn parse_eval(&mut self) -> Result<Eval, ParserError> {
-    let _ = self.eat(TokenKind::Eval)?;
-    let func = self.parse_expr()?;
-    let _ = self.eat(TokenKind::LParen)?;
-    let args = self.parse_comma_separated(TokenKind::RParen, |parser| parser.eat_int())?;
-    let _ = self.eat(TokenKind::RParen)?;
-    let _ = self.eat(TokenKind::Semicolon)?;
-    Ok(Eval { func, args })
+fn eat_int<I>(parser: &mut Parser<I>) -> Result<u64, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  let token = eat(parser, TokenKind::Int)?;
+  token
+    .literal
+    .parse::<u64>()
+    .map_err(|_| ParserError::InvalidInteger(token))
+}
+
+fn munch_comma_separated<T, I>(
+  parser: &mut Parser<I>,
+  terminator: TokenKind,
+  mut eat_element: impl FnMut(&mut Parser<I>) -> Result<T, ParserError>,
+) -> Result<Vec<T>, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  let mut elements = Vec::new();
+  if parser.peek_is(terminator) {
+    return Ok(elements);
   }
-
-  fn parse_expr(&mut self) -> Result<Expr, ParserError> {
-    let token = self.peek_eof()?;
-    match token.kind {
-      TokenKind::Const => {
-        self.next();
-        let _ = self.eat(TokenKind::LParen)?;
-        let arity = self.eat_int()? as usize;
-        let _ = self.eat(TokenKind::Comma)?;
-        let value = self.eat_int()?;
-        let _ = self.eat(TokenKind::RParen)?;
-        Ok(Expr::Const { arity, value })
+  loop {
+    elements.push(eat_element(parser)?);
+    match parser.peek() {
+      Some(Token { kind, .. }) if *kind == terminator => break,
+      Some(Token {
+        kind: TokenKind::Comma,
+        ..
+      }) => {
+        let _ = eat(parser, TokenKind::Comma)?;
+        if parser.peek_is(terminator) {
+          break;
+        }
       }
-      TokenKind::Succ => {
-        self.next();
-        Ok(Expr::Succ)
-      }
-      TokenKind::Id => {
-        self.next();
-        let _ = self.eat(TokenKind::LParen)?;
-        let k = self.eat_int()? as usize;
-        let _ = self.eat(TokenKind::Comma)?;
-        let n = self.eat_int()? as usize;
-        let _ = self.eat(TokenKind::RParen)?;
-        Ok(Expr::Id { k, n })
-      }
-      TokenKind::Ident => {
-        let token = self.next_eof()?;
-        Ok(Expr::Ref(token.literal))
-      }
-      TokenKind::Cn => {
-        self.next();
-        let _ = self.eat(TokenKind::LBracket)?;
-        let f = self.parse_expr()?;
-        let _ = self.eat(TokenKind::Comma)?;
-        let gs = self.parse_comma_separated(TokenKind::RBracket, |parser| parser.parse_expr())?;
-        let _ = self.eat(TokenKind::RBracket)?;
-        Ok(Expr::Cn { f: Box::new(f), gs })
-      }
-      TokenKind::Pr => {
-        self.next();
-        let _ = self.eat(TokenKind::LBracket)?;
-        let base = self.parse_expr()?;
-        let _ = self.eat(TokenKind::Comma)?;
-        let step = self.parse_expr()?;
-        let _ = self.eat(TokenKind::RBracket)?;
-        Ok(Expr::Pr {
-          base: Box::new(base),
-          step: Box::new(step),
-        })
-      }
-      TokenKind::Mn => {
-        self.next();
-        let _ = self.eat(TokenKind::LBracket)?;
-        let f = self.parse_expr()?;
-        let _ = self.eat(TokenKind::RBracket)?;
-        Ok(Expr::Mn { f: Box::new(f) })
-      }
-      _ => Err(ParserError::UnexpectedToken(self.peek_eof()?.clone())),
+      _ => return Err(ParserError::UnexpectedToken(peek_eof(parser)?.clone())),
     }
+  }
+  Ok(elements)
+}
+
+fn synchronize<I>(parser: &mut Parser<I>)
+where
+  I: Iterator<Item = Token>,
+{
+  while let Some(token) = parser.peek() {
+    if token.kind == TokenKind::Semicolon {
+      let _ = parser.advance();
+      return;
+    }
+    let _ = parser.advance();
+  }
+}
+
+fn eat_decl<I>(parser: &mut Parser<I>) -> Result<Decl, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  match peek_eof(parser)?.kind {
+    TokenKind::Def => eat_def(parser).map(Into::into),
+    TokenKind::Eval => eat_eval(parser).map(Into::into),
+    _ => Err(ParserError::UnexpectedToken(peek_eof(parser)?.clone())),
+  }
+}
+
+fn eat_def<I>(parser: &mut Parser<I>) -> Result<Def, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  let _ = eat(parser, TokenKind::Def)?;
+  let name_token = eat(parser, TokenKind::Ident)?;
+  let _ = eat(parser, TokenKind::Assign)?;
+  let body = eat_expr(parser)?;
+  let _ = eat(parser, TokenKind::Semicolon)?;
+  Ok(Def {
+    name: name_token.literal,
+    body,
+  })
+}
+
+fn eat_eval<I>(parser: &mut Parser<I>) -> Result<Eval, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  let _ = eat(parser, TokenKind::Eval)?;
+  let func = eat_expr(parser)?;
+  let _ = eat(parser, TokenKind::LParen)?;
+  let args = munch_comma_separated(parser, TokenKind::RParen, |p| eat_int(p))?;
+  let _ = eat(parser, TokenKind::RParen)?;
+  let _ = eat(parser, TokenKind::Semicolon)?;
+  Ok(Eval { func, args })
+}
+
+fn eat_expr<I>(parser: &mut Parser<I>) -> Result<Expr, ParserError>
+where
+  I: Iterator<Item = Token>,
+{
+  let token = peek_eof(parser)?;
+  match token.kind {
+    TokenKind::Const => {
+      parser.advance();
+      let _ = eat(parser, TokenKind::LParen)?;
+      let arity = eat_int(parser)? as usize;
+      let _ = eat(parser, TokenKind::Comma)?;
+      let value = eat_int(parser)?;
+      let _ = eat(parser, TokenKind::RParen)?;
+      Ok(Expr::Const { arity, value })
+    }
+    TokenKind::Succ => {
+      parser.advance();
+      Ok(Expr::Succ)
+    }
+    TokenKind::Id => {
+      parser.advance();
+      let _ = eat(parser, TokenKind::LParen)?;
+      let k = eat_int(parser)? as usize;
+      let _ = eat(parser, TokenKind::Comma)?;
+      let n = eat_int(parser)? as usize;
+      let _ = eat(parser, TokenKind::RParen)?;
+      Ok(Expr::Id { k, n })
+    }
+    TokenKind::Ident => {
+      let token = advance_eof(parser)?;
+      Ok(Expr::Ref(token.literal))
+    }
+    TokenKind::Cn => {
+      parser.advance();
+      let _ = eat(parser, TokenKind::LBracket)?;
+      let f = eat_expr(parser)?;
+      let _ = eat(parser, TokenKind::Comma)?;
+      let gs = munch_comma_separated(parser, TokenKind::RBracket, |p| eat_expr(p))?;
+      let _ = eat(parser, TokenKind::RBracket)?;
+      Ok(Expr::Cn { f: Box::new(f), gs })
+    }
+    TokenKind::Pr => {
+      parser.advance();
+      let _ = eat(parser, TokenKind::LBracket)?;
+      let base = eat_expr(parser)?;
+      let _ = eat(parser, TokenKind::Comma)?;
+      let step = eat_expr(parser)?;
+      let _ = eat(parser, TokenKind::RBracket)?;
+      Ok(Expr::Pr {
+        base: Box::new(base),
+        step: Box::new(step),
+      })
+    }
+    TokenKind::Mn => {
+      parser.advance();
+      let _ = eat(parser, TokenKind::LBracket)?;
+      let f = eat_expr(parser)?;
+      let _ = eat(parser, TokenKind::RBracket)?;
+      Ok(Expr::Mn { f: Box::new(f) })
+    }
+    _ => Err(ParserError::UnexpectedToken(peek_eof(parser)?.clone())),
   }
 }
 
