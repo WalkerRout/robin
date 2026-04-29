@@ -93,13 +93,13 @@ fn main() -> Result<(), anyhow::Error> {
   })?;
 
   // lower ast into mid ir
-  let ir = Lower::new().lower(&program)?;
+  let ir = Lower::new().lower(program)?;
 
   // jit compile and run in process, print results from rust
   #[cfg(feature = "jit")]
   if args.emit == EmitType::Jit {
     use lib_robin_core::backend::cranelift::JitBackend;
-    let mut jit = JitBackend::new_jit(opt_str)?.compile(&ir)?;
+    let mut jit = JitBackend::new_jit(opt_str)?.compile(ir)?;
     let results = jit.run_evals()?;
     for result in results {
       println!("{result}");
@@ -108,7 +108,7 @@ fn main() -> Result<(), anyhow::Error> {
   }
 
   // aot compile ir to native object code
-  let compiled = AotBackend::new_aot(opt_str)?.compile(&ir)?;
+  let compiled = AotBackend::new_aot(opt_str)?.compile(ir)?;
 
   // determine output paths
   let input_path = Path::new(&args.input);

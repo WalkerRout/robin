@@ -13,7 +13,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 #[cfg(feature = "jit")]
 use cranelift_jit::{JITBuilder, JITModule};
 
-use crate::ir::{Cmp, EvalIR, FuncIR, Node, ProgramIR, Visitor};
+use crate::ir::{Cmp, EvalIR, FuncIR, Node, ProgramIR};
 
 #[derive(thiserror::Error, Debug)]
 pub enum CodegenError {
@@ -41,252 +41,6 @@ pub enum CodegenError {
 impl From<cranelift_module::ModuleError> for CodegenError {
   fn from(e: cranelift_module::ModuleError) -> Self {
     CodegenError::Module(Box::new(e))
-  }
-}
-
-// borrow split context for emission
-// - borrows module and func_ids while some `FunctionBuilder` lives
-struct EmitCtx<'a, M> {
-  module: &'a mut M,
-  func_ids: &'a HashMap<String, FuncId>,
-  printf_id: FuncId,
-  exit_id: FuncId,
-  fmt_div_id: DataId,
-  ptr_ty: types::Type,
-}
-
-impl<M> EmitCtx<'_, M>
-where
-  M: Module,
-{
-  // walk tree and emit cranelift ir, returning resulting ssa value
-  fn emit_node(
-    &mut self,
-    builder: &mut FunctionBuilder,
-    node: &Node,
-    func_args: &[Value],
-    loop_stack: &[(Value, Value)],
-    search_stack: &[Value],
-  ) -> Result<Value, CodegenError> {
-    match node {
-      Node::Iconst(v) => Ok(builder.ins().iconst(types::I64, *v)),
-      Node::Arg(i) => Ok(func_args[*i]),
-      Node::Counter(depth) => {
-        let idx = loop_stack.len() - 1 - depth;
-        Ok(loop_stack[idx].0)
-      }
-      Node::Acc(depth) => {
-        let idx = loop_stack.len() - 1 - depth;
-        Ok(loop_stack[idx].1)
-      }
-      Node::Probe(depth) => {
-        let idx = search_stack.len() - 1 - depth;
-        Ok(search_stack[idx])
-      }
-      Node::Iadd(a, b) => {
-        let va = self.emit_node(builder, a, func_args, loop_stack, search_stack)?;
-        let vb = self.emit_node(builder, b, func_args, loop_stack, search_stack)?;
-        Ok(builder.ins().iadd(va, vb))
-      }
-      Node::Isub(a, b) => {
-        let va = self.emit_node(builder, a, func_args, loop_stack, search_stack)?;
-        let vb = self.emit_node(builder, b, func_args, loop_stack, search_stack)?;
-        Ok(builder.ins().isub(va, vb))
-      }
-      Node::Imul(a, b) => {
-        let va = self.emit_node(builder, a, func_args, loop_stack, search_stack)?;
-        let vb = self.emit_node(builder, b, func_args, loop_stack, search_stack)?;
-        Ok(builder.ins().imul(va, vb))
-      }
-      Node::Icmp(cmp, a, b) => {
-        let va = self.emit_node(builder, a, func_args, loop_stack, search_stack)?;
-        let vb = self.emit_node(builder, b, func_args, loop_stack, search_stack)?;
-        let cc = match cmp {
-          Cmp::Eq => IntCC::Equal,
-          Cmp::Ne => IntCC::NotEqual,
-          Cmp::Ult => IntCC::UnsignedLessThan,
-          Cmp::Ugt => IntCC::UnsignedGreaterThan,
-          Cmp::Uge => IntCC::UnsignedGreaterThanOrEqual,
-        };
-        let result = builder.ins().icmp(cc, va, vb);
-        Ok(result)
-      }
-      Node::Select {
-        cond,
-        then_val,
-        else_val,
-      } => {
-        let vc = self.emit_node(builder, cond, func_args, loop_stack, search_stack)?;
-        let vt = self.emit_node(builder, then_val, func_args, loop_stack, search_stack)?;
-        let ve = self.emit_node(builder, else_val, func_args, loop_stack, search_stack)?;
-        Ok(builder.ins().select(vc, vt, ve))
-      }
-      Node::Call { name, args } => {
-        let values: Vec<Value> = args
-          .iter()
-          .map(|a| self.emit_node(builder, a, func_args, loop_stack, search_stack))
-          .collect::<Result<_, _>>()?;
-        let func_id = self.func_ids[name];
-        let func_ref = self.module.declare_func_in_func(func_id, builder.func);
-        let call = builder.ins().call(func_ref, &values);
-        Ok(builder.inst_results(call)[0])
-      }
-      Node::Loop { bound, init, body } => self.emit_loop(
-        builder,
-        bound,
-        init,
-        body,
-        func_args,
-        loop_stack,
-        search_stack,
-      ),
-      Node::Search { body, limit } => {
-        self.emit_search(builder, body, *limit, func_args, loop_stack, search_stack)
-      }
-    }
-  }
-
-  // primitive recursion, only for loops...
-  //
-  // acc = new
-  // for i in 0..bound { acc = body(i, acc) }
-  // return acc
-  //
-  // (sorry clippy)
-  #[allow(clippy::too_many_arguments)]
-  fn emit_loop(
-    &mut self,
-    builder: &mut FunctionBuilder,
-    bound: &Node,
-    new: &Node,
-    body: &Node,
-    func_args: &[Value],
-    loop_stack: &[(Value, Value)],
-    search_stack: &[Value],
-  ) -> Result<Value, CodegenError> {
-    let bound_val = self.emit_node(builder, bound, func_args, loop_stack, search_stack)?;
-    let new_val = self.emit_node(builder, new, func_args, loop_stack, search_stack)?;
-
-    let header = builder.create_block();
-    let loop_body = builder.create_block();
-    let exit = builder.create_block();
-
-    // loops need (counter, acc)
-    builder.append_block_param(header, types::I64);
-    builder.append_block_param(header, types::I64);
-
-    let zero = builder.ins().iconst(types::I64, 0);
-    builder
-      .ins()
-      .jump(header, &[BlockArg::Value(zero), BlockArg::Value(new_val)]);
-
-    // header
-    // - check counter < bound
-    builder.switch_to_block(header);
-    let i_val = builder.block_params(header)[0];
-    let acc_val = builder.block_params(header)[1];
-    let cmp = builder
-      .ins()
-      .icmp(IntCC::UnsignedLessThan, i_val, bound_val);
-    builder.ins().brif(cmp, loop_body, &[], exit, &[]);
-
-    // body
-    // - evaluate with this loop's variables pushed onto the stack
-    builder.switch_to_block(loop_body);
-    let mut new_loop_stack = loop_stack.to_vec();
-    new_loop_stack.push((i_val, acc_val));
-    let step_val = self.emit_node(builder, body, func_args, &new_loop_stack, search_stack)?;
-    let one = builder.ins().iconst(types::I64, 1);
-    let i_next = builder.ins().iadd(i_val, one);
-    builder.ins().jump(
-      header,
-      &[BlockArg::Value(i_next), BlockArg::Value(step_val)],
-    );
-
-    // exit
-    builder.switch_to_block(exit);
-
-    Ok(acc_val)
-  }
-
-  // unbounded search is bounded in practice since we need to converge eventually...
-  //
-  // y = 0
-  // while y < limit:
-  //   if body(y) == 0: return y
-  //   y += 1
-  // diverge!
-  fn emit_search(
-    &mut self,
-    builder: &mut FunctionBuilder,
-    body: &Node,
-    limit: i64,
-    func_args: &[Value],
-    loop_stack: &[(Value, Value)],
-    search_stack: &[Value],
-  ) -> Result<Value, CodegenError> {
-    let guard = builder.create_block();
-    let eval_bb = builder.create_block();
-    let next = builder.create_block();
-    let found = builder.create_block();
-    let div = builder.create_block();
-
-    // guard(y: i64)
-    builder.append_block_param(guard, types::I64);
-
-    let zero = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(guard, &[BlockArg::Value(zero)]);
-
-    // guard, check step limit
-    builder.switch_to_block(guard);
-    let y_val = builder.block_params(guard)[0];
-    let limit_val = builder.ins().iconst(types::I64, limit);
-    let over = builder
-      .ins()
-      .icmp(IntCC::UnsignedGreaterThanOrEqual, y_val, limit_val);
-    builder.ins().brif(over, div, &[], eval_bb, &[]);
-
-    // eval
-    // - compute body with this search's probe pushed onto the stack
-    builder.switch_to_block(eval_bb);
-    let mut new_search_stack = search_stack.to_vec();
-    new_search_stack.push(y_val);
-    let f_val = self.emit_node(builder, body, func_args, loop_stack, &new_search_stack)?;
-    let zero2 = builder.ins().iconst(types::I64, 0);
-    let is_zero = builder.ins().icmp(IntCC::Equal, f_val, zero2);
-    builder.ins().brif(is_zero, found, &[], next, &[]);
-
-    // increment y
-    builder.switch_to_block(next);
-    let one = builder.ins().iconst(types::I64, 1);
-    let y_next = builder.ins().iadd(y_val, one);
-    builder.ins().jump(guard, &[BlockArg::Value(y_next)]);
-
-    // diverged! print our message, exit 1, trap
-    builder.switch_to_block(div);
-    self.emit_diverged(builder);
-
-    // found target, return least y
-    builder.switch_to_block(found);
-
-    Ok(y_val)
-  }
-
-  // emit backend internal "diverged" handler
-  fn emit_diverged(&mut self, builder: &mut FunctionBuilder) {
-    let printf_ref = self
-      .module
-      .declare_func_in_func(self.printf_id, builder.func);
-    let gv = self
-      .module
-      .declare_data_in_func(self.fmt_div_id, builder.func);
-    let fmt_ptr = builder.ins().global_value(self.ptr_ty, gv);
-    let dummy = builder.ins().iconst(types::I64, 0);
-    builder.ins().call(printf_ref, &[fmt_ptr, dummy]);
-    let exit_ref = self.module.declare_func_in_func(self.exit_id, builder.func);
-    let exit_code = builder.ins().iconst(types::I32, 1);
-    builder.ins().call(exit_ref, &[exit_code]);
-    builder.ins().trap(TrapCode::unwrap_user(1));
   }
 }
 
@@ -323,8 +77,8 @@ where
     exit_sig.params.push(AbiParam::new(types::I32));
     let exit_id = module.declare_function("exit", Linkage::Import, &exit_sig)?;
 
-    let fmt_id = Self::define_data(&mut module, ".fmt", b"%llu\n\0")?;
-    let fmt_div_id = Self::define_data(
+    let fmt_id = define_data(&mut module, ".fmt", b"%llu\n\0")?;
+    let fmt_div_id = define_data(
       &mut module,
       ".fmt.div",
       b"diverged: mu-minimization did not converge\n\0",
@@ -342,47 +96,195 @@ where
       eval_ids: Vec::new(),
     })
   }
+}
 
-  fn define_data(module: &mut M, name: &str, bytes: &[u8]) -> Result<DataId, CodegenError> {
-    let data_id = module.declare_data(name, Linkage::Local, false, false)?;
-    let mut desc = DataDescription::new();
-    desc.define(bytes.to_vec().into_boxed_slice());
-    module.define_data(data_id, &desc)?;
-    Ok(data_id)
-  }
+// borrow split context for emission
+// - borrows module and func_ids while some `FunctionBuilder` lives
+struct EmitCtx<'a, M> {
+  module: &'a mut M,
+  func_ids: &'a HashMap<String, FuncId>,
+  printf_id: FuncId,
+  exit_id: FuncId,
+  fmt_div_id: DataId,
+  ptr_ty: types::Type,
+}
 
-  fn build_func(&mut self, func_ir: &FuncIR) -> Result<(), CodegenError> {
-    let func_id = self.func_ids[&func_ir.name];
+// codegen free functions
 
-    let mut sig = self.module.make_signature();
+fn define_data<M>(module: &mut M, name: &str, bytes: &[u8]) -> Result<DataId, CodegenError>
+where
+  M: Module,
+{
+  let data_id = module.declare_data(name, Linkage::Local, false, false)?;
+  let mut desc = DataDescription::new();
+  desc.define(bytes.to_vec().into_boxed_slice());
+  module.define_data(data_id, &desc)?;
+  Ok(data_id)
+}
+
+fn declare_and_define<M>(codegen: &mut Codegen<M>, funcs: &[FuncIR]) -> Result<(), CodegenError>
+where
+  M: Module,
+{
+  // pass 1 - forward declarations
+  for func_ir in funcs {
+    let mut sig = codegen.module.make_signature();
     for _ in 0..func_ir.arity {
       sig.params.push(AbiParam::new(types::I64));
     }
     sig.returns.push(AbiParam::new(types::I64));
+    let func_id = codegen
+      .module
+      .declare_function(&func_ir.name, Linkage::Export, &sig)?;
+    codegen.func_ids.insert(func_ir.name.clone(), func_id);
+  }
+
+  // pass 2 - define function bodies
+  for func_ir in funcs {
+    build_func(codegen, func_ir)?;
+  }
+
+  Ok(())
+}
+
+fn build_func<M>(codegen: &mut Codegen<M>, func_ir: &FuncIR) -> Result<(), CodegenError>
+where
+  M: Module,
+{
+  let func_id = codegen.func_ids[&func_ir.name];
+
+  let mut sig = codegen.module.make_signature();
+  for _ in 0..func_ir.arity {
+    sig.params.push(AbiParam::new(types::I64));
+  }
+  sig.returns.push(AbiParam::new(types::I64));
+
+  let mut func = Function::new();
+  func.signature = sig;
+
+  {
+    let mut builder = FunctionBuilder::new(&mut func, &mut codegen.builder_ctx);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+
+    let arg_values: Vec<Value> = (0..func_ir.arity)
+      .map(|i| builder.block_params(entry)[i])
+      .collect();
+
+    let result = {
+      let mut ctx = EmitCtx {
+        module: &mut codegen.module,
+        func_ids: &codegen.func_ids,
+        printf_id: codegen.printf_id,
+        exit_id: codegen.exit_id,
+        fmt_div_id: codegen.fmt_div_id,
+        ptr_ty: codegen.ptr_ty,
+      };
+      emit_node(&mut ctx, &mut builder, &func_ir.body, &arg_values, &[], &[])?
+    };
+
+    builder.ins().return_(&[result]);
+    builder.seal_all_blocks();
+    builder.finalize();
+  }
+
+  let mut clif_ctx = ClifContext::for_function(func);
+  codegen.module.define_function(func_id, &mut clif_ctx)?;
+
+  Ok(())
+}
+
+fn build_main<M>(codegen: &mut Codegen<M>, evals: &[EvalIR]) -> Result<(), CodegenError>
+where
+  M: Module,
+{
+  let mut sig = codegen.module.make_signature();
+  sig.returns.push(AbiParam::new(types::I32));
+
+  let main_id = codegen
+    .module
+    .declare_function("main", Linkage::Export, &sig)?;
+
+  let mut func = Function::new();
+  func.signature = sig;
+
+  {
+    let mut builder = FunctionBuilder::new(&mut func, &mut codegen.builder_ctx);
+    let entry = builder.create_block();
+    builder.switch_to_block(entry);
+
+    for eval in evals {
+      // eval bodies fully applied (args already `Iconst`), so func_args is empty
+      let result = {
+        let mut ctx = EmitCtx {
+          module: &mut codegen.module,
+          func_ids: &codegen.func_ids,
+          printf_id: codegen.printf_id,
+          exit_id: codegen.exit_id,
+          fmt_div_id: codegen.fmt_div_id,
+          ptr_ty: codegen.ptr_ty,
+        };
+        emit_node(&mut ctx, &mut builder, &eval.body, &[], &[], &[])?
+      };
+
+      // printf("%llu\n", result)
+      let printf_ref = codegen
+        .module
+        .declare_func_in_func(codegen.printf_id, builder.func);
+      let gv = codegen
+        .module
+        .declare_data_in_func(codegen.fmt_id, builder.func);
+      let fmt_ptr = builder.ins().global_value(codegen.ptr_ty, gv);
+      builder.ins().call(printf_ref, &[fmt_ptr, result]);
+    }
+
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().return_(&[zero]);
+
+    builder.seal_all_blocks();
+    builder.finalize();
+  }
+
+  let mut clif_ctx = ClifContext::for_function(func);
+  codegen.module.define_function(main_id, &mut clif_ctx)?;
+
+  Ok(())
+}
+
+#[cfg(feature = "jit")]
+fn build_evals<M>(codegen: &mut Codegen<M>, evals: &[EvalIR]) -> Result<(), CodegenError>
+where
+  M: Module,
+{
+  for (i, eval) in evals.iter().enumerate() {
+    let name = format!("__robin_eval_{i}");
+
+    let mut sig = codegen.module.make_signature();
+    sig.returns.push(AbiParam::new(types::I64));
+
+    let func_id = codegen
+      .module
+      .declare_function(&name, Linkage::Export, &sig)?;
 
     let mut func = Function::new();
     func.signature = sig;
 
     {
-      let mut builder = FunctionBuilder::new(&mut func, &mut self.builder_ctx);
+      let mut builder = FunctionBuilder::new(&mut func, &mut codegen.builder_ctx);
       let entry = builder.create_block();
-      builder.append_block_params_for_function_params(entry);
       builder.switch_to_block(entry);
-
-      let arg_values: Vec<Value> = (0..func_ir.arity)
-        .map(|i| builder.block_params(entry)[i])
-        .collect();
 
       let result = {
         let mut ctx = EmitCtx {
-          module: &mut self.module,
-          func_ids: &self.func_ids,
-          printf_id: self.printf_id,
-          exit_id: self.exit_id,
-          fmt_div_id: self.fmt_div_id,
-          ptr_ty: self.ptr_ty,
+          module: &mut codegen.module,
+          func_ids: &codegen.func_ids,
+          printf_id: codegen.printf_id,
+          exit_id: codegen.exit_id,
+          fmt_div_id: codegen.fmt_div_id,
+          ptr_ty: codegen.ptr_ty,
         };
-        ctx.emit_node(&mut builder, &func_ir.body, &arg_values, &[], &[])?
+        emit_node(&mut ctx, &mut builder, &eval.body, &[], &[], &[])?
       };
 
       builder.ins().return_(&[result]);
@@ -391,85 +293,255 @@ where
     }
 
     let mut clif_ctx = ClifContext::for_function(func);
-    self.module.define_function(func_id, &mut clif_ctx)?;
-
-    Ok(())
+    codegen.module.define_function(func_id, &mut clif_ctx)?;
+    codegen.eval_ids.push(func_id);
   }
 
-  // shared two-pass declare then define
-  fn declare_and_define(&mut self, funcs: &[FuncIR]) -> Result<(), CodegenError> {
-    // pass 1 - forward declarations
-    for func_ir in funcs {
-      let mut sig = self.module.make_signature();
-      for _ in 0..func_ir.arity {
-        sig.params.push(AbiParam::new(types::I64));
-      }
-      sig.returns.push(AbiParam::new(types::I64));
-      let func_id = self
-        .module
-        .declare_function(&func_ir.name, Linkage::Export, &sig)?;
-      self.func_ids.insert(func_ir.name.clone(), func_id);
-    }
+  Ok(())
+}
 
-    // pass 2 - define function bodies
-    for func_ir in funcs {
-      self.build_func(func_ir)?;
-    }
+// emit free functions
 
-    Ok(())
+fn emit_node<M>(
+  ctx: &mut EmitCtx<M>,
+  builder: &mut FunctionBuilder,
+  node: &Node,
+  func_args: &[Value],
+  loop_stack: &[(Value, Value)],
+  search_stack: &[Value],
+) -> Result<Value, CodegenError>
+where
+  M: Module,
+{
+  match node {
+    Node::Iconst(v) => Ok(builder.ins().iconst(types::I64, *v)),
+    Node::Arg(i) => Ok(func_args[*i]),
+    Node::Counter(depth) => {
+      let idx = loop_stack.len() - 1 - depth;
+      Ok(loop_stack[idx].0)
+    }
+    Node::Acc(depth) => {
+      let idx = loop_stack.len() - 1 - depth;
+      Ok(loop_stack[idx].1)
+    }
+    Node::Probe(depth) => {
+      let idx = search_stack.len() - 1 - depth;
+      Ok(search_stack[idx])
+    }
+    Node::Iadd(a, b) => {
+      let va = emit_node(ctx, builder, a, func_args, loop_stack, search_stack)?;
+      let vb = emit_node(ctx, builder, b, func_args, loop_stack, search_stack)?;
+      Ok(builder.ins().iadd(va, vb))
+    }
+    Node::Isub(a, b) => {
+      let va = emit_node(ctx, builder, a, func_args, loop_stack, search_stack)?;
+      let vb = emit_node(ctx, builder, b, func_args, loop_stack, search_stack)?;
+      Ok(builder.ins().isub(va, vb))
+    }
+    Node::Imul(a, b) => {
+      let va = emit_node(ctx, builder, a, func_args, loop_stack, search_stack)?;
+      let vb = emit_node(ctx, builder, b, func_args, loop_stack, search_stack)?;
+      Ok(builder.ins().imul(va, vb))
+    }
+    Node::Icmp(cmp, a, b) => {
+      let va = emit_node(ctx, builder, a, func_args, loop_stack, search_stack)?;
+      let vb = emit_node(ctx, builder, b, func_args, loop_stack, search_stack)?;
+      let cc = match cmp {
+        Cmp::Eq => IntCC::Equal,
+        Cmp::Ne => IntCC::NotEqual,
+        Cmp::Ult => IntCC::UnsignedLessThan,
+        Cmp::Ugt => IntCC::UnsignedGreaterThan,
+        Cmp::Uge => IntCC::UnsignedGreaterThanOrEqual,
+      };
+      Ok(builder.ins().icmp(cc, va, vb))
+    }
+    Node::Select {
+      cond,
+      then_val,
+      else_val,
+    } => {
+      let vc = emit_node(ctx, builder, cond, func_args, loop_stack, search_stack)?;
+      let vt = emit_node(ctx, builder, then_val, func_args, loop_stack, search_stack)?;
+      let ve = emit_node(ctx, builder, else_val, func_args, loop_stack, search_stack)?;
+      Ok(builder.ins().select(vc, vt, ve))
+    }
+    Node::Call { name, args } => {
+      let values: Vec<Value> = args
+        .iter()
+        .map(|a| emit_node(ctx, builder, a, func_args, loop_stack, search_stack))
+        .collect::<Result<_, _>>()?;
+      let func_id = ctx.func_ids[name];
+      let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+      let call = builder.ins().call(func_ref, &values);
+      Ok(builder.inst_results(call)[0])
+    }
+    Node::Loop { bound, init, body } => emit_loop(
+      ctx,
+      builder,
+      bound,
+      init,
+      body,
+      func_args,
+      loop_stack,
+      search_stack,
+    ),
+    Node::Search { body, limit } => emit_search(
+      ctx,
+      builder,
+      body,
+      *limit,
+      func_args,
+      loop_stack,
+      search_stack,
+    ),
   }
+}
 
-  fn build_main(&mut self, evals: &[EvalIR]) -> Result<(), CodegenError> {
-    let mut sig = self.module.make_signature();
-    sig.returns.push(AbiParam::new(types::I32));
+// primitive recursion, only for loops...
+//
+// acc = new
+// for i in 0..bound { acc = body(i, acc) }
+// return acc
+#[allow(clippy::too_many_arguments)]
+fn emit_loop<M>(
+  ctx: &mut EmitCtx<M>,
+  builder: &mut FunctionBuilder,
+  bound: &Node,
+  new: &Node,
+  body: &Node,
+  func_args: &[Value],
+  loop_stack: &[(Value, Value)],
+  search_stack: &[Value],
+) -> Result<Value, CodegenError>
+where
+  M: Module,
+{
+  let bound_val = emit_node(ctx, builder, bound, func_args, loop_stack, search_stack)?;
+  let new_val = emit_node(ctx, builder, new, func_args, loop_stack, search_stack)?;
 
-    let main_id = self
-      .module
-      .declare_function("main", Linkage::Export, &sig)?;
+  let header = builder.create_block();
+  let loop_body = builder.create_block();
+  let exit = builder.create_block();
 
-    let mut func = Function::new();
-    func.signature = sig;
+  // loops need (counter, acc)
+  builder.append_block_param(header, types::I64);
+  builder.append_block_param(header, types::I64);
 
-    {
-      let mut builder = FunctionBuilder::new(&mut func, &mut self.builder_ctx);
-      let entry = builder.create_block();
-      builder.switch_to_block(entry);
+  let zero = builder.ins().iconst(types::I64, 0);
+  builder
+    .ins()
+    .jump(header, &[BlockArg::Value(zero), BlockArg::Value(new_val)]);
 
-      for eval in evals {
-        // eval bodies fully applied (args already `Iconst`), so func_args is empty
-        let result = {
-          let mut ctx = EmitCtx {
-            module: &mut self.module,
-            func_ids: &self.func_ids,
-            printf_id: self.printf_id,
-            exit_id: self.exit_id,
-            fmt_div_id: self.fmt_div_id,
-            ptr_ty: self.ptr_ty,
-          };
-          ctx.emit_node(&mut builder, &eval.body, &[], &[], &[])?
-        };
+  // header
+  // - check counter < bound
+  builder.switch_to_block(header);
+  let i_val = builder.block_params(header)[0];
+  let acc_val = builder.block_params(header)[1];
+  let cmp = builder
+    .ins()
+    .icmp(IntCC::UnsignedLessThan, i_val, bound_val);
+  builder.ins().brif(cmp, loop_body, &[], exit, &[]);
 
-        // printf("%llu\n", result)
-        let printf_ref = self
-          .module
-          .declare_func_in_func(self.printf_id, builder.func);
-        let gv = self.module.declare_data_in_func(self.fmt_id, builder.func);
-        let fmt_ptr = builder.ins().global_value(self.ptr_ty, gv);
-        builder.ins().call(printf_ref, &[fmt_ptr, result]);
-      }
+  // body
+  // - evaluate with this loop's variables pushed onto the stack
+  builder.switch_to_block(loop_body);
+  let mut new_loop_stack = loop_stack.to_vec();
+  new_loop_stack.push((i_val, acc_val));
+  let step_val = emit_node(ctx, builder, body, func_args, &new_loop_stack, search_stack)?;
+  let one = builder.ins().iconst(types::I64, 1);
+  let i_next = builder.ins().iadd(i_val, one);
+  builder.ins().jump(
+    header,
+    &[BlockArg::Value(i_next), BlockArg::Value(step_val)],
+  );
 
-      let zero = builder.ins().iconst(types::I32, 0);
-      builder.ins().return_(&[zero]);
+  // exit
+  builder.switch_to_block(exit);
 
-      builder.seal_all_blocks();
-      builder.finalize();
-    }
+  Ok(acc_val)
+}
 
-    let mut clif_ctx = ClifContext::for_function(func);
-    self.module.define_function(main_id, &mut clif_ctx)?;
+// unbounded search is bounded in practice since we need to converge eventually...
+//
+// y = 0
+// while y < limit:
+//   if body(y) == 0: return y
+//   y += 1
+// diverge!
+fn emit_search<M>(
+  ctx: &mut EmitCtx<M>,
+  builder: &mut FunctionBuilder,
+  body: &Node,
+  limit: i64,
+  func_args: &[Value],
+  loop_stack: &[(Value, Value)],
+  search_stack: &[Value],
+) -> Result<Value, CodegenError>
+where
+  M: Module,
+{
+  let guard = builder.create_block();
+  let eval_bb = builder.create_block();
+  let next = builder.create_block();
+  let found = builder.create_block();
+  let div = builder.create_block();
 
-    Ok(())
-  }
+  // guard(y: i64)
+  builder.append_block_param(guard, types::I64);
+
+  let zero = builder.ins().iconst(types::I64, 0);
+  builder.ins().jump(guard, &[BlockArg::Value(zero)]);
+
+  // guard, check step limit
+  builder.switch_to_block(guard);
+  let y_val = builder.block_params(guard)[0];
+  let limit_val = builder.ins().iconst(types::I64, limit);
+  let over = builder
+    .ins()
+    .icmp(IntCC::UnsignedGreaterThanOrEqual, y_val, limit_val);
+  builder.ins().brif(over, div, &[], eval_bb, &[]);
+
+  // eval
+  // - compute body with this search's probe pushed onto the stack
+  builder.switch_to_block(eval_bb);
+  let mut new_search_stack = search_stack.to_vec();
+  new_search_stack.push(y_val);
+  let f_val = emit_node(ctx, builder, body, func_args, loop_stack, &new_search_stack)?;
+  let zero2 = builder.ins().iconst(types::I64, 0);
+  let is_zero = builder.ins().icmp(IntCC::Equal, f_val, zero2);
+  builder.ins().brif(is_zero, found, &[], next, &[]);
+
+  // increment y
+  builder.switch_to_block(next);
+  let one = builder.ins().iconst(types::I64, 1);
+  let y_next = builder.ins().iadd(y_val, one);
+  builder.ins().jump(guard, &[BlockArg::Value(y_next)]);
+
+  // diverged! print our message, exit 1, trap
+  builder.switch_to_block(div);
+  emit_diverged(ctx, builder);
+
+  // found target, return least y
+  builder.switch_to_block(found);
+
+  Ok(y_val)
+}
+
+fn emit_diverged<M>(ctx: &mut EmitCtx<M>, builder: &mut FunctionBuilder)
+where
+  M: Module,
+{
+  let printf_ref = ctx.module.declare_func_in_func(ctx.printf_id, builder.func);
+  let gv = ctx
+    .module
+    .declare_data_in_func(ctx.fmt_div_id, builder.func);
+  let fmt_ptr = builder.ins().global_value(ctx.ptr_ty, gv);
+  let dummy = builder.ins().iconst(types::I64, 0);
+  builder.ins().call(printf_ref, &[fmt_ptr, dummy]);
+  let exit_ref = ctx.module.declare_func_in_func(ctx.exit_id, builder.func);
+  let exit_code = builder.ins().iconst(types::I32, 1);
+  builder.ins().call(exit_ref, &[exit_code]);
+  builder.ins().trap(TrapCode::unwrap_user(1));
 }
 
 // aot backend, compiles to object files
@@ -500,25 +572,11 @@ impl AotBackend {
   }
 
   /// consume the backend, compile the ir, and return a `CompiledObject`
-  pub fn compile(mut self, ir: &ProgramIR) -> Result<CompiledObject, CodegenError> {
-    self.visit_program(ir)?;
+  pub fn compile(mut self, ir: ProgramIR) -> Result<CompiledObject, CodegenError> {
+    declare_and_define(&mut self, &ir.funcs)?;
+    build_main(&mut self, &ir.evals)?;
     let product = self.module.finish();
     Ok(CompiledObject { product })
-  }
-}
-
-/// para :: `ProgramIR` -> `AotBackend`
-impl Visitor for AotBackend {
-  type Error = CodegenError;
-
-  fn visit_program(&mut self, ir: &ProgramIR) -> Result<(), CodegenError> {
-    self.declare_and_define(&ir.funcs)?;
-    self.build_main(&ir.evals)?;
-    Ok(())
-  }
-
-  fn visit_func(&mut self, func: &FuncIR) -> Result<(), CodegenError> {
-    self.build_func(func)
   }
 }
 
@@ -541,8 +599,8 @@ impl CompiledObject {
   }
 }
 
-#[cfg(feature = "jit")]
 // jit backend, compiles to memory and runs directly in process
+#[cfg(feature = "jit")]
 pub type JitBackend = Codegen<JITModule>;
 
 #[cfg(feature = "jit")]
@@ -573,71 +631,13 @@ impl JitBackend {
   }
 
   /// consume the backend, compile the ir, and return a `JitProgram`
-  pub fn compile(mut self, ir: &ProgramIR) -> Result<JitProgram, CodegenError> {
-    self.visit_program(ir)?;
+  pub fn compile(mut self, ir: ProgramIR) -> Result<JitProgram, CodegenError> {
+    declare_and_define(&mut self, &ir.funcs)?;
+    build_evals(&mut self, &ir.evals)?;
     Ok(JitProgram {
       module: self.module,
       eval_ids: self.eval_ids,
     })
-  }
-
-  // compile each eval as standalone no-argument function returning an `i64`
-  fn build_evals(&mut self, evals: &[EvalIR]) -> Result<(), CodegenError> {
-    for (i, eval) in evals.iter().enumerate() {
-      let name = format!("__robin_eval_{i}");
-
-      let mut sig = self.module.make_signature();
-      sig.returns.push(AbiParam::new(types::I64));
-
-      let func_id = self.module.declare_function(&name, Linkage::Export, &sig)?;
-
-      let mut func = Function::new();
-      func.signature = sig;
-
-      {
-        let mut builder = FunctionBuilder::new(&mut func, &mut self.builder_ctx);
-        let entry = builder.create_block();
-        builder.switch_to_block(entry);
-
-        let result = {
-          let mut ctx = EmitCtx {
-            module: &mut self.module,
-            func_ids: &self.func_ids,
-            printf_id: self.printf_id,
-            exit_id: self.exit_id,
-            fmt_div_id: self.fmt_div_id,
-            ptr_ty: self.ptr_ty,
-          };
-          ctx.emit_node(&mut builder, &eval.body, &[], &[], &[])?
-        };
-
-        builder.ins().return_(&[result]);
-        builder.seal_all_blocks();
-        builder.finalize();
-      }
-
-      let mut clif_ctx = ClifContext::for_function(func);
-      self.module.define_function(func_id, &mut clif_ctx)?;
-      self.eval_ids.push(func_id);
-    }
-
-    Ok(())
-  }
-}
-
-/// para :: `ProgramIR` -> `JitBackend`
-#[cfg(feature = "jit")]
-impl Visitor for JitBackend {
-  type Error = CodegenError;
-
-  fn visit_program(&mut self, ir: &ProgramIR) -> Result<(), CodegenError> {
-    self.declare_and_define(&ir.funcs)?;
-    self.build_evals(&ir.evals)?;
-    Ok(())
-  }
-
-  fn visit_func(&mut self, func: &FuncIR) -> Result<(), CodegenError> {
-    self.build_func(func)
   }
 }
 
@@ -679,10 +679,10 @@ mod tests {
       let lexer = Lexer::new(input);
       let parser = Parser::new(lexer);
       let program = parser.parse().expect("program parses");
-      let ir = Lower::new().lower(&program).expect("program lowers");
+      let ir = Lower::new().lower(program).expect("program lowers");
       AotBackend::new_aot("speed")
         .expect("backend created")
-        .compile(&ir)
+        .compile(ir)
         .expect("compiles")
         .into_bytes()
         .expect("emits")
@@ -810,10 +810,10 @@ mod tests {
       let lexer = Lexer::new(input);
       let parser = Parser::new(lexer);
       let program = parser.parse().expect("program parses");
-      let ir = Lower::new().lower(&program).expect("program lowers");
+      let ir = Lower::new().lower(program).expect("program lowers");
       let mut jit = JitBackend::new_jit("speed")
         .expect("jit created")
-        .compile(&ir)
+        .compile(ir)
         .expect("compiles");
       jit.run_evals().expect("jit evals run")
     }

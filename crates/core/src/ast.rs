@@ -1,54 +1,5 @@
 use std::fmt;
 
-/// paramorphic algebra over the ast
-///
-/// ```text
-/// para :: (Base Program (Program, a) -> a) -> Program -> a
-/// ```
-///
-/// each method is one case of the base functor
-pub trait Visitor {
-  type Error;
-
-  fn visit_program(&mut self, program: &Program) -> Result<(), Self::Error> {
-    for decl in &program.decls {
-      match decl {
-        Decl::Def(def) => self.visit_def(def)?,
-        Decl::Eval(eval) => self.visit_eval(eval)?,
-      }
-    }
-    Ok(())
-  }
-
-  fn visit_def(&mut self, def: &Def) -> Result<(), Self::Error> {
-    self.visit_expr(&def.body)
-  }
-
-  fn visit_eval(&mut self, eval: &Eval) -> Result<(), Self::Error> {
-    self.visit_expr(&eval.func)
-  }
-
-  fn visit_expr(&mut self, expr: &Expr) -> Result<(), Self::Error> {
-    match expr {
-      Expr::Cn { f, gs } => {
-        self.visit_expr(f)?;
-        for g in gs {
-          self.visit_expr(g)?;
-        }
-      }
-      Expr::Pr { base, step } => {
-        self.visit_expr(base)?;
-        self.visit_expr(step)?;
-      }
-      Expr::Mn { f } => {
-        self.visit_expr(f)?;
-      }
-      Expr::Const { .. } | Expr::Succ | Expr::Id { .. } | Expr::Ref(_) => {}
-    }
-    Ok(())
-  }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
   pub decls: Vec<Decl>,

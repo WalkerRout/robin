@@ -1,91 +1,24 @@
 use std::fmt;
 
-/// paramorphic algebra over the ir
-///
-/// ```text
-/// para :: (Base ProgramIR (ProgramIR, a) -> a) -> ProgramIR -> a
-/// ```
-///
-/// each method is one case of the base functor
-pub trait Visitor {
-  type Error;
-
-  fn visit_program(&mut self, ir: &ProgramIR) -> Result<(), Self::Error> {
-    for func in &ir.funcs {
-      self.visit_func(func)?;
-    }
-    for eval in &ir.evals {
-      self.visit_eval(eval)?;
-    }
-    Ok(())
-  }
-
-  fn visit_func(&mut self, func: &FuncIR) -> Result<(), Self::Error> {
-    self.visit_node(&func.body)
-  }
-
-  fn visit_eval(&mut self, eval: &EvalIR) -> Result<(), Self::Error> {
-    self.visit_node(&eval.body)
-  }
-
-  fn visit_node(&mut self, node: &Node) -> Result<(), Self::Error> {
-    match node {
-      Node::Iadd(a, b) | Node::Isub(a, b) | Node::Imul(a, b) => {
-        self.visit_node(a)?;
-        self.visit_node(b)?;
-      }
-      Node::Icmp(_, a, b) => {
-        self.visit_node(a)?;
-        self.visit_node(b)?;
-      }
-      Node::Select {
-        cond,
-        then_val,
-        else_val,
-      } => {
-        self.visit_node(cond)?;
-        self.visit_node(then_val)?;
-        self.visit_node(else_val)?;
-      }
-      Node::Call { args, .. } => {
-        for arg in args {
-          self.visit_node(arg)?;
-        }
-      }
-      Node::Loop { bound, init, body } => {
-        self.visit_node(bound)?;
-        self.visit_node(init)?;
-        self.visit_node(body)?;
-      }
-      Node::Search { body, .. } => {
-        self.visit_node(body)?;
-      }
-      Node::Iconst(_) | Node::Arg(_) | Node::Counter(_) | Node::Acc(_) | Node::Probe(_) => {}
-    }
-    Ok(())
-  }
+/// lowered program consists of all function definitions and eval statements
+#[derive(Debug)]
+pub struct ProgramIR {
+  pub funcs: Vec<FuncIR>,
+  pub evals: Vec<EvalIR>,
 }
 
-/// comparison operators for the ir
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cmp {
-  Eq,
-  Ne,
-  Ult,
-  Ugt,
-  Uge,
+/// a compiled `def` statement
+#[derive(Debug)]
+pub struct FuncIR {
+  pub name: String,
+  pub arity: usize,
+  pub body: Node,
 }
 
-impl fmt::Display for Cmp {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Cmp::Eq => write!(f, "eq"),
-      Cmp::Ne => write!(f, "ne"),
-      Cmp::Ult => write!(f, "ult"),
-      Cmp::Ugt => write!(f, "ugt"),
-      Cmp::Uge => write!(f, "uge"),
-    }
-  }
+/// a fully applied `eval` statement
+#[derive(Debug)]
+pub struct EvalIR {
+  pub body: Node,
 }
 
 /// node in the middle-end intermediate representation
@@ -186,25 +119,26 @@ impl fmt::Display for Node {
   }
 }
 
-/// a compiled `def` statement
-#[derive(Debug)]
-pub struct FuncIR {
-  pub name: String,
-  pub arity: usize,
-  pub body: Node,
+/// comparison operators for the ir
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cmp {
+  Eq,
+  Ne,
+  Ult,
+  Ugt,
+  Uge,
 }
 
-/// a fully applied `eval` statement
-#[derive(Debug)]
-pub struct EvalIR {
-  pub body: Node,
-}
-
-/// lowered program consists of all function definitions and eval statements
-#[derive(Debug)]
-pub struct ProgramIR {
-  pub funcs: Vec<FuncIR>,
-  pub evals: Vec<EvalIR>,
+impl fmt::Display for Cmp {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Cmp::Eq => write!(f, "eq"),
+      Cmp::Ne => write!(f, "ne"),
+      Cmp::Ult => write!(f, "ult"),
+      Cmp::Ugt => write!(f, "ugt"),
+      Cmp::Uge => write!(f, "uge"),
+    }
+  }
 }
 
 // increment all `Counter`/`Acc` depths by some amount, useful for pushing nodes down through nested `Loop`s
